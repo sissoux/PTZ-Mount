@@ -206,3 +206,17 @@ def test_homing_with_switch_inside_range(tmp_path):
         await asyncio.sleep(0.05)
         assert ctrl.position("pan") == pytest.approx(-96, abs=0.1)
     run(t, tmp_path, text)
+
+
+def test_estop_reset_clears_error_and_diag(tmp_path):
+    async def t(ctrl):
+        await ctrl.estop()
+        ctrl.last_error = "emergency stop"
+        await asyncio.sleep(0.05)
+        assert ctrl.status()["estop"]
+        assert (await dispatch(ctrl, {"cmd": "clear_estop"}))["ok"]
+        st = ctrl.status()
+        assert not st["estop"] and st["error"] == ""
+        r = await dispatch(ctrl, {"cmd": "diag"})
+        assert r["ok"] and set(r["diag"]) == {"pan", "tilt", "zoom"}
+    run(t, tmp_path)

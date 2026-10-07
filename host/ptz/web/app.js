@@ -50,6 +50,10 @@ function renderStatus(s) {
   status = s;
   setConn(s.connected);
   $("estop-badge").classList.toggle("hidden", !s.estop);
+  // While E-stopped, the big red button becomes the reset button
+  const b = $("btn-estop");
+  b.textContent = s.estop ? "RESET E-STOP" : "E-STOP";
+  b.classList.toggle("reset", s.estop);
   if (s.error) showError(s.error);
   for (const [name, a] of Object.entries(s.axes)) {
     const p = $(`pos-${name}`); if (!p) continue;
@@ -119,6 +123,7 @@ const KEYS = { ArrowLeft: ["x", -1], ArrowRight: ["x", 1], ArrowUp: ["y", 1], Ar
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" && e.target.type === "number") return;
   if (e.code === "Space") { send({ cmd: "stop" }); e.preventDefault(); return; }
+  if (e.key === "Escape") { send({ cmd: "estop" }); e.preventDefault(); return; }
   const k = KEYS[e.key]; if (!k) return;
   input.keys[k[0]] = k[1] * (e.shiftKey ? 0.3 : 1); e.preventDefault();
 });
@@ -152,7 +157,8 @@ $("speed").oninput = () => {
   $("speed-val").textContent = `${Math.round(v * 100)}%`;
   send({ cmd: "set_speed", value: v });
 };
-$("btn-estop").onclick = () => send({ cmd: "estop", id: "es" });
+$("btn-estop").onclick = () =>
+  send(status && status.estop ? { cmd: "clear_estop", id: "ce" } : { cmd: "estop", id: "es" });
 $("btn-clear").onclick = () => send({ cmd: "clear_estop", id: "ce" });
 $("btn-stop").onclick = () => send({ cmd: "stop", id: "st" });
 $("btn-home").onclick = () => send({ cmd: "home", id: "ho" });

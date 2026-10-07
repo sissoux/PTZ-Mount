@@ -23,6 +23,7 @@ TPWMTHRS = 0x13
 CHOPCONF = 0x6C
 DRV_STATUS = 0x6F
 PWMCONF = 0x70
+IOIN = 0x06
 
 TMC_CLOCK = 12_000_000
 MAX_CURRENT = 2.0
@@ -96,6 +97,17 @@ def register_values(axis: AxisConfig) -> List[Tuple[int, int]]:
         (TPOWERDOWN, 20),
         (TPWMTHRS, thrs),
     ]
+
+
+def decode_ioin(value: int) -> dict:
+    """Pin levels as seen by the driver itself (TMC2209 IOIN register)."""
+    return {
+        "enn": bool(value & (1 << 0)), "ms1": bool(value & (1 << 2)),
+        "ms2": bool(value & (1 << 3)), "diag": bool(value & (1 << 4)),
+        "pdn_uart": bool(value & (1 << 6)), "step": bool(value & (1 << 7)),
+        "spread_en": bool(value & (1 << 8)), "dir": bool(value & (1 << 9)),
+        "version": (value >> 24) & 0xFF,
+    }
 
 
 def decode_drv_status(value: int) -> dict:

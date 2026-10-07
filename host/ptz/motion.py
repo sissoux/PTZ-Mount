@@ -345,6 +345,45 @@ class MotionController:
 
     async def clear_estop(self) -> None:
         await self.link.request("CLEAR_ESTOP")
+        self.sys_flags &= ~P.SYS_ESTOP       # don't wait for the next STATUS
+        self.last_error = ""
+        log.info("emergency stop cleared")
+
+    # ================================================================ diagnostics
+    async def diagnostics(self) -> dict:
+        """Endstop states plus the TMC2209 view of its own pins (IOIN).
+
+        IOIN.diag shows the driver's DIAG output. On the SKR Pico a DIAG jumper
+        connects it to the endstop input of the same axis, which masks the switch.
+        """
+        out = {}
+        for ax in self.axes:
+            st = self.state[ax.name]
+            d = {"endstop_triggered": bool(st.flags & P.ST_ENDSTOP),
+                 "endstop_pin": f"gpio{ax.endstop_pin.gpio}" if ax.has_endstop else None,
+                 "endstop_invert": ax.endstop_pin.invert,
+                 "endstop_pullup": ax.endstop_pin.pullup,
+                 "endstop_guard": ax.endstop_guard,
+                 "enabled": bool(st.flags & P.ST_ENABLED)}
+            if ax.tmc is not None and self.cfg.tmc_uart is not None:
+                regs = {}
+                for name, reg in (("GCONF", tmc2209.GCONF), ("GSTAT", tmc2209.GSTAT),
+                                  ("IFCNT", tmc2209.IFCNT), ("IOIN", tmc2209.IOIN),
+                                  ("DRV_STATUS", tmc2209.DRV_STATUS)):
+                    r = await self.link.request("TMC_READ", addr=ax.tmc.uart_address, reg=reg)
+                    regs[name] = r["value"] if r["ok"] else None
+                d["tmc_registers"] = {k: (None if v is None else f"0x{v:08x}")
+                                      for k, v in regs.items()}
+                if regs["IOIN"] is not None:
+                    d["tmc_pins"] = tmc2209.decode_ioin(regs["IOIN"])
+                if regs["DRV_STATUS"] is not None:
+                    d["tmc_status"] = tmc2209.decode_drv_status(regs["DRV_STATUS"])
+                if regs["GSTAT"] is not None:
+                    d["tmc_gstat"] = {"reset": bool(regs["GSTAT"] & 1),
+                                      "drv_err": bool(regs["GSTAT"] & 2),
+                                      "uv_cp": bool(regs["GSTAT"] & 4)}
+            out[ax.name] = d
+        return out
 
     async def enable(self, on: bool, names: Optional[Iterable[str]] = None) -> None:
         names = list(names) if names else [a.name for a in self.axes]
@@ -358,6 +397,7 @@ class MotionController:
     # ================================================================ homing
     async def home(self, names: Optional[Iterable[str]] = None) -> None:
         """Home the given axes, or every axis with home_with_all = True."""
+        self.last_error = ""
         names = list(names) if names else [a.name for a in self.axes if a.home_with_all]
         self._check_ready()
         if not names:

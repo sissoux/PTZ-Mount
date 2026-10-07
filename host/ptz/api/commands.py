@@ -14,6 +14,7 @@ the reply so clients can match answers. Examples:
     {"cmd": "preset_recall", "preset": 1, "speed": 0.8}
     {"cmd": "preset_delete", "preset": 1}
     {"cmd": "presets"}   {"cmd": "status"}   {"cmd": "config"}
+    {"cmd": "diag"}      endstop states + TMC2209 registers (troubleshooting)
 """
 from __future__ import annotations
 
@@ -82,6 +83,8 @@ async def dispatch(ctrl: MotionController, msg: Any) -> dict:
             reply["presets"] = ctrl.presets.all()
         elif cmd == "status":
             reply["status"] = ctrl.status()
+        elif cmd == "diag":
+            reply["diag"] = await ctrl.diagnostics()
         elif cmd == "config":
             reply["config"] = config_summary(ctrl)
         else:

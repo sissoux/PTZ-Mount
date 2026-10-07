@@ -92,6 +92,14 @@ stops by itself.
   e-stop, presets, VISCA).
 * Firmware: complete first version. It has been syntax-checked, but **not yet
   compiled with the Pico SDK nor run on the board**.
-* Pins in `config/ptz.cfg` are the stock SKR Pico v1.0 mapping
-  (X = pan, Y = tilt, Z = zoom). Check them, and the endstop polarity, against
-  your working Klipper `printer.cfg`.
+* `config/ptz.cfg` carries over the pins, polarities, gearing, travel limits,
+  endstop positions and driver currents of the original Klipper setup
+  (`config/PreviousConfig.cfg`). A test checks that they stay in sync.
+
+## Useful axis options
+
+| Option | Effect |
+|---|---|
+| `enabled: False` | Axis ignored entirely (hardware not fitted) |
+| `home_with_all: False` | Axis skipped by "Home all" and default homing, still homable alone |
+| `endstop_guard: auto` | MCU stops the axis on its switch outside homing, only if the switch is at the end of travel |

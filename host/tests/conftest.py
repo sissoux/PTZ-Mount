@@ -5,3 +5,4 @@ HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
 
 CONFIG_PATH = os.path.abspath(os.path.join(HERE, "..", "..", "config", "ptz.cfg"))
+PREVIOUS_CONFIG_PATH = os.path.abspath(os.path.join(HERE, "..", "..", "config", "PreviousConfig.cfg"))

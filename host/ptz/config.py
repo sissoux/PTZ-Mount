@@ -13,6 +13,9 @@ from typing import Dict, List, Optional
 
 from .protocol import MAX_AXES, PIN_NONE
 
+#: Max step rate per axis of the firmware (STEP_TICK_HZ / 2 in firmware/src/config.h)
+MCU_MAX_STEP_RATE = 20000.0
+
 
 class ConfigError(Exception):
     pass
@@ -173,6 +176,8 @@ class AxisConfig:
     max_accel: float
     jog_velocity: float
     jog_accel: float
+    home_with_all: bool = True       # included in "Home all" / default homing
+    endstop_guard: bool = True       # MCU halts the axis on its endstop outside homing
     tmc: Optional[TmcConfig] = None
 
     @property
@@ -200,6 +205,7 @@ class PtzConfig:
     tmc_uart: Optional[TmcUartConfig]
     axes: Dict[str, AxisConfig] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    disabled_axes: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- loader
@@ -246,13 +252,18 @@ def load(path: str) -> PtzConfig:
                                  baud=s.getint("baud", 115200))
 
     axes: Dict[str, AxisConfig] = {}
+    disabled: List[str] = []
     for name in cp.sections():
         if not name.startswith("axis "):
             continue
         aname = name.split(None, 1)[1].strip()
+        if not _Section(cp, name).getbool("enabled", True):
+            disabled.append(aname)       # axis ignored entirely (hardware not fitted)
+            continue
         if len(axes) >= MAX_AXES:
             raise ConfigError(f"too many axes (max {MAX_AXES})")
         s = sec(name)
+        s.get("enabled")
         pmin = s.getfloat("position_min", _REQUIRED)
         pmax = s.getfloat("position_max", _REQUIRED)
         if pmax <= pmin:
@@ -281,7 +292,27 @@ def load(path: str) -> PtzConfig:
             max_velocity=max_vel, max_accel=max_acc,
             jog_velocity=s.getfloat("jog_velocity", max_vel, 0, max_vel),
             jog_accel=s.getfloat("jog_accel", max_acc, 0, max_acc),
+            home_with_all=s.getbool("home_with_all", True),
         )
+        # Endstop guard: only meaningful when the switch sits at the end of
+        # travel. If position_endstop is inside [min, max] (switch in the middle
+        # of the range, as on the original Klipper setup), the switch may be
+        # pressed during normal moves, so the guard is off by default.
+        guard = (s.get("endstop_guard", "auto") or "auto").lower()
+        if guard == "auto":
+            if ax.homing_positive_dir:
+                ax.endstop_guard = ax.position_endstop >= pmax
+            else:
+                ax.endstop_guard = ax.position_endstop <= pmin
+        else:
+            ax.endstop_guard = guard in ("1", "true", "yes", "on")
+        if max_vel * ax.steps_per_unit > MCU_MAX_STEP_RATE:
+            raise ConfigError(
+                f"[{name}] max_velocity {max_vel} needs {max_vel * ax.steps_per_unit:.0f} "
+                f"steps/s, firmware limit is {MCU_MAX_STEP_RATE:.0f} "
+                f"(max {MCU_MAX_STEP_RATE / ax.steps_per_unit:.1f} units/s)")
+        if ax.homing_speed > max_vel or ax.second_homing_speed > max_vel:
+            raise ConfigError(f"[{name}] homing speeds must be <= max_velocity")
         if ax.microsteps not in (1, 2, 4, 8, 16, 32, 64, 128, 256):
             raise ConfigError(f"[{name}] invalid microsteps {ax.microsteps}")
         if park is not None and not pmin <= park <= pmax:
@@ -289,6 +320,14 @@ def load(path: str) -> PtzConfig:
         tname = f"tmc2209 {aname}"
         if cp.has_section(tname):
             t = sec(tname)
+            # Klipper puts the bus pins in every [tmc2209] section: accept them
+            rx, tx = t.get("uart_pin", None), t.get("tx_pin", None)
+            if rx:
+                bus = TmcUartConfig(parse_pin(rx), parse_pin(tx) if tx else parse_pin(rx), 115200)
+                if tmc_uart is None:
+                    tmc_uart = bus
+                elif (bus.rx_pin.gpio, bus.tx_pin.gpio) != (tmc_uart.rx_pin.gpio, tmc_uart.tx_pin.gpio):
+                    raise ConfigError(f"[{tname}] uart_pin/tx_pin differ from the shared TMC bus")
             run = t.getfloat("run_current", _REQUIRED, 0.05, 2.0)
             ax.tmc = TmcConfig(
                 uart_address=t.getint("uart_address", 0),
@@ -306,12 +345,18 @@ def load(path: str) -> PtzConfig:
     for name in cp.sections():
         if name not in known and not name.startswith(("axis ", "tmc2209 ")):
             cfg.warnings.append(f"unknown section [{name}]")
-        if name.startswith("tmc2209 ") and name.split(None, 1)[1] not in axes:
+        tm = name.split(None, 1)[1] if name.startswith("tmc2209 ") else None
+        if tm and tm not in axes and tm not in disabled:
             cfg.warnings.append(f"[{name}] has no matching [axis ...]")
     for s in sections:
         for k in s.unused():
             cfg.warnings.append(f"[{s.name}] unknown option '{k}'")
-    for h in motion.home_on_start:
-        if h not in axes:
+    cfg.tmc_uart = tmc_uart
+    for h in list(motion.home_on_start):
+        if h in disabled:
+            motion.home_on_start.remove(h)
+            cfg.warnings.append(f"home_on_start: axis '{h}' is disabled, skipped")
+        elif h not in axes:
             raise ConfigError(f"home_on_start: unknown axis '{h}'")
+    cfg.disabled_axes = disabled
     return cfg

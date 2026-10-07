@@ -7,7 +7,7 @@ the reply so clients can match answers. Examples:
     {"cmd": "goto", "pan": 10, "tilt": 5, "speed": 0.5}      user units
     {"cmd": "move_rel", "pan": -2}
     {"cmd": "stop"}            {"cmd": "estop"}      {"cmd": "clear_estop"}
-    {"cmd": "home", "axes": ["pan", "tilt"]}         (all axes if omitted)
+    {"cmd": "home", "axes": ["pan", "tilt"]}  (omitted: axes with home_with_all)
     {"cmd": "enable", "on": true}
     {"cmd": "set_speed", "value": 0.5}               global speed factor
     {"cmd": "preset_save", "preset": 1, "name": "Stage"}
@@ -98,6 +98,8 @@ def config_summary(ctrl: MotionController) -> dict:
             "min": a.position_min, "max": a.position_max,
             "max_velocity": a.max_velocity, "jog_velocity": a.jog_velocity,
             "has_endstop": a.has_endstop, "steps_per_unit": a.steps_per_unit,
+            "home_with_all": a.home_with_all,
         } for a in ctrl.axes],
         "jog_timeout": ctrl.cfg.motion.jog_timeout,
+        "disabled_axes": ctrl.cfg.disabled_axes,
     }

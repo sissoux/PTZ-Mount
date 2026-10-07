@@ -5,7 +5,9 @@ the same control law (see firmware/src/stepper.c). Used to develop the host,
 web UI and clients on a PC:  python -m ptz --sim
 
 Each simulated endstop sits SIM_ENDSTOP_DISTANCE microsteps away from the
-power-on position, on the side given by CONFIG_AXIS.endstop_dir.
+power-on position, on the side given by CONFIG_AXIS.endstop_dir (or, when the
+guard is disabled, by the direction of the first HOME command). It behaves like
+a cam: pressed for every position beyond it.
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ class SimAxis:
         self.stopping = False   # STOP/watchdog: decelerate with max_accel
         self.endstop_dir = 0
         self.has_endstop = False
+        self.es_side = -1
         self.pos = 0.0              # microsteps (float, integer in firmware)
         self.offset = 0.0           # physical = pos + offset
         self.v = 0.0
@@ -52,11 +55,11 @@ class SimAxis:
         self.guard_dir = 0
 
     def endstop_active(self) -> bool:
-        if not self.has_endstop or self.endstop_dir == 0:
+        if not self.has_endstop:
             return False
         phys = self.pos + self.offset
-        es = self.endstop_dir * SIM_ENDSTOP_DISTANCE
-        return (phys - es) * self.endstop_dir >= 0
+        es = self.es_side * SIM_ENDSTOP_DISTANCE
+        return (phys - es) * self.es_side >= 0
 
 
 class SimTransport:
@@ -128,6 +131,8 @@ class SimTransport:
             a.vel_accel = min(f["vel_accel"], f["max_accel"]) or f["max_accel"]
             a.endstop_dir = f["endstop_dir"]
             a.has_endstop = f["endstop_pin"] != P.PIN_NONE
+            if a.endstop_dir:
+                a.es_side = a.endstop_dir
             self._ack(m)
         elif n == "CONFIG_TMC_UART":
             self.tmc_ready = True
@@ -195,6 +200,8 @@ class SimTransport:
             if self.estop:
                 return self._ack(m, 5)
             a.mode, a.home_vel = MODE_HOMING, f["velocity"]
+            if not a.endstop_dir:
+                a.es_side = 1 if a.home_vel > 0 else -1
             a.home_start, a.home_max_travel = a.pos, f["max_travel"]
             a.halted = False
             self._ack(m)

@@ -65,10 +65,11 @@ max_accel: 4000
 """
 
 
-def run(coro_fn, tmp_path):
+def run(coro_fn, tmp_path, cfg_text=None):
     async def main():
         p = tmp_path / "t.cfg"
-        p.write_text(FAST_CFG.format(state=str(tmp_path).replace("\\", "/")))
+        text = cfg_text if cfg_text is not None else FAST_CFG
+        p.write_text(text.format(state=str(tmp_path).replace("\\", "/")))
         cfg = C.load(str(p))
         assert cfg.warnings == []
         ctrl = MotionController(cfg, McuLink(SimTransport()))
@@ -171,3 +172,37 @@ def test_visca_drive_and_inquiry(tmp_path):
         reply = v._handle(bytes([0x81, 0x09, 0x06, 0x12, 0xFF]))[0]
         assert reply[:2] == bytes([0x90, 0x50]) and len(reply) == 11
     run(t, tmp_path)
+
+
+def test_home_all_skips_axes_excluded_from_homing(tmp_path):
+    text = FAST_CFG.replace("[axis zoom]\n", "[axis zoom]\nhome_with_all: False\n")
+
+    async def t(ctrl):
+        await ctrl.home()
+        st = ctrl.status()["axes"]
+        assert st["pan"]["homed"] and st["tilt"]["homed"]
+        assert not st["zoom"]["homed"]
+        await ctrl.home(["zoom"])                  # still homable on its own
+        assert ctrl.status()["axes"]["zoom"]["homed"]
+    run(t, tmp_path, text)
+
+
+def test_homing_with_switch_inside_range(tmp_path):
+    """Original Klipper layout: pan switch at -96 inside -180..180. The axis
+    may start on the pressed side; homing must back off until released."""
+    text = (FAST_CFG.replace("position_min: -170", "position_min: -180")
+            .replace("position_max: 170", "position_max: 180")
+            .replace("position_endstop: -175", "position_endstop: -96"))
+
+    async def t(ctrl):
+        assert not ctrl.axis("pan").endstop_guard
+        await ctrl.home(["pan"])
+        assert ctrl.position("pan") == pytest.approx(-96, abs=0.1)
+        # move well into the "pressed" region (no guard, so this is allowed)
+        await ctrl.goto({"pan": -150}, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.status()["axes"]["pan"]["endstop"]
+        await ctrl.home(["pan"])
+        await asyncio.sleep(0.05)
+        assert ctrl.position("pan") == pytest.approx(-96, abs=0.1)
+    run(t, tmp_path, text)

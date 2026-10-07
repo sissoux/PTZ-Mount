@@ -135,7 +135,8 @@ class MotionController:
             flags |= P.AXF_ENABLE_INVERT if ax.enable_pin.invert else 0
             flags |= P.AXF_ENDSTOP_INVERT if ax.endstop_pin.invert else 0
             flags |= P.AXF_ENDSTOP_PULLUP if ax.endstop_pin.pullup else 0
-            es_dir = (1 if ax.homing_positive_dir else -1) if ax.has_endstop else 0
+            es_dir = ((1 if ax.homing_positive_dir else -1)
+                      if ax.has_endstop and ax.endstop_guard else 0)
             spu = ax.steps_per_unit
             await self.link.request(
                 "CONFIG_AXIS", axis=ax.index, step_pin=ax.step_pin.gpio,
@@ -356,8 +357,11 @@ class MotionController:
 
     # ================================================================ homing
     async def home(self, names: Optional[Iterable[str]] = None) -> None:
-        names = list(names) if names else [a.name for a in self.axes]
+        """Home the given axes, or every axis with home_with_all = True."""
+        names = list(names) if names else [a.name for a in self.axes if a.home_with_all]
         self._check_ready()
+        if not names:
+            raise MotionError("no axis to home")
         await asyncio.gather(*(self._home_axis(self.axis(n)) for n in names))
 
     async def _home_axis(self, ax: AxisConfig) -> None:
@@ -372,23 +376,17 @@ class MotionController:
             await self.link.request("SET_LIMITS", axis=ax.index, min=0, max=0, enabled=0)
             if not ax.has_endstop:
                 # No switch: current position is declared to be position_endstop
-                await self.link.request("SET_POSITION", axis=ax.index,
-                                        position=ax.to_steps(ax.position_endstop))
+                await self._set_position(ax, ax.position_endstop)
             else:
                 d = 1 if ax.homing_positive_dir else -1
                 travel = ax.to_steps((ax.position_max - ax.position_min) * 1.5
                                      + ax.homing_retract_dist)
                 log.info("homing %s", ax.name)
                 trig = await self._home_approach(ax, d * ax.homing_speed * spu, travel)
-                retract = ax.to_steps(ax.homing_retract_dist)
-                fut = self._expect(ax.index, P.EV_MOVE_DONE)
-                await self.link.request("MOVE_TO", axis=ax.index, target=trig - d * retract,
-                                        max_vel=ax.homing_speed * spu,
-                                        accel=ax.max_accel * spu)
-                await asyncio.wait_for(fut, 30)
+                retract = max(1, ax.to_steps(ax.homing_retract_dist))
+                await self._home_retract(ax, trig, d, retract, travel)
                 await self._home_approach(ax, d * ax.second_homing_speed * spu, retract * 3)
-                await self.link.request("SET_POSITION", axis=ax.index,
-                                        position=ax.to_steps(ax.position_endstop))
+                await self._set_position(ax, ax.position_endstop)
             await self.link.request("SET_LIMITS", axis=ax.index,
                                     min=ax.to_steps(ax.position_min),
                                     max=ax.to_steps(ax.position_max), enabled=1)
@@ -401,6 +399,33 @@ class MotionController:
             target = min(max(ax.position_endstop, ax.position_min), ax.position_max)
         if target is not None:
             await self.goto({ax.name: target}, wait=True)
+
+    async def _set_position(self, ax: AxisConfig, units: float) -> None:
+        steps = ax.to_steps(units)
+        await self.link.request("SET_POSITION", axis=ax.index, position=steps)
+        self.state[ax.name].pos = steps      # don't wait for the next STATUS
+
+    async def _home_retract(self, ax: AxisConfig, trig: int, d: int, retract: int,
+                            travel: int) -> None:
+        """Back off from the switch until it is released, then retract once more.
+
+        Handles both a momentary switch and a cam/flag that stays pressed over
+        a whole region (the axis may start inside that region).
+        """
+        spu = ax.steps_per_unit
+        target = trig
+        settle = 2.5 / self.cfg.mcu.status_rate
+        while True:
+            target -= d * retract
+            if abs(target - trig) > travel:
+                raise MotionError(f"homing {ax.name}: endstop never released")
+            fut = self._expect(ax.index, P.EV_MOVE_DONE)
+            await self.link.request("MOVE_TO", axis=ax.index, target=target,
+                                    max_vel=ax.homing_speed * spu, accel=ax.max_accel * spu)
+            await asyncio.wait_for(fut, 30)
+            await asyncio.sleep(settle)                # fresh STATUS with endstop state
+            if not self.state[ax.name].flags & P.ST_ENDSTOP:
+                return
 
     async def _home_approach(self, ax: AxisConfig, velocity: float, travel: int) -> int:
         fut = self._expect(ax.index, P.EV_HOME_TRIGGERED, P.EV_HOME_FAILED)

@@ -37,9 +37,13 @@ function buildAxesTable() {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${a.name}</td><td class="num" id="pos-${a.name}">-</td>
       <td class="num" id="vel-${a.name}">-</td><td id="st-${a.name}"></td>
-      <td><input id="goto-${a.name}" type="number" step="any" min="${a.min}" max="${a.max}"></td>`;
+      <td><input id="goto-${a.name}" type="number" step="any" min="${a.min}" max="${a.max}"></td>
+      <td><button class="small" title="Home this axis only">Home</button></td>`;
+    tr.querySelector("button").onclick = () => send({ cmd: "home", axes: [a.name], id: "ha" });
     tb.appendChild(tr);
   }
+  const homed = config.axes.filter((a) => a.home_with_all).map((a) => a.name);
+  $("btn-home").title = `Homes: ${homed.join(", ") || "none"} (home_with_all in ptz.cfg)`;
 }
 function flag(text, on, cls = "on") { return `<span class="flag ${on ? cls : ""}">${text}</span>`; }
 function renderStatus(s) {

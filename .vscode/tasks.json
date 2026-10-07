@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "PTZ: restart daemon",
+      "type": "shell",
+      "command": "./deploy/update.sh --no-pull",
+      "problemMatcher": []
+    },
+    {
+      "label": "PTZ: pull from GitHub + restart",
+      "type": "shell",
+      "command": "./deploy/update.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "PTZ: follow logs",
+      "type": "shell",
+      "command": "journalctl -u ptz -f -o cat | grep --line-buffered -v aiohttp.access",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "PTZ: diagnostics (endstops + drivers)",
+      "type": "shell",
+      "command": "curl -s -X POST -H 'Content-Type: application/json' -d '{\"cmd\":\"diag\"}' localhost:8080/api/cmd | python3 -m json.tool",
+      "problemMatcher": []
+    },
+    {
+      "label": "PTZ: build + flash firmware",
+      "type": "shell",
+      "command": "./firmware/flash.sh",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    }
+  ]
+}

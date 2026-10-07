@@ -91,3 +91,28 @@ Logs:
 ```sh
 journalctl -u ptz -f
 ```
+
+## 5. Working directly on the Pi (VS Code Remote-SSH)
+
+One-time, on the Pi:
+
+```sh
+cd ~/ptz && ./deploy/setup-remote.sh
+```
+
+This allows `systemctl start|stop|restart ptz` without a password and lets
+`picotool` reach the board over USB. Keep the SKR Pico USB-C cable connected
+to the Pi to flash without pressing BOOT.
+
+In VS Code: Remote Explorer, connect to `klipper-rpi` (from `~/.ssh/config`),
+then open the folder `/home/<user>/ptz`. `Terminal > Run Task` offers:
+
+| Task | Does |
+|---|---|
+| PTZ: restart daemon | Restart after editing Python or `config/ptz.cfg` |
+| PTZ: pull from GitHub + restart | Get changes pushed from elsewhere |
+| PTZ: follow logs | Live daemon log (endstop changes are logged) |
+| PTZ: diagnostics | Endstop states and TMC2209 driver registers |
+| PTZ: build + flash firmware | Rebuild and flash the RP2040 over USB |
+
+Commit and push from the Pi as usual: VS Code forwards your GitHub sign-in.

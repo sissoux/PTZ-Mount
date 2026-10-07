@@ -20,7 +20,8 @@ state/
 *.log
 
 # Editors / OS
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .idea/
 Thumbs.db
 .DS_Store

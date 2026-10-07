@@ -220,3 +220,106 @@ def test_estop_reset_clears_error_and_diag(tmp_path):
         r = await dispatch(ctrl, {"cmd": "diag"})
         assert r["ok"] and set(r["diag"]) == {"pan", "tilt", "zoom"}
     run(t, tmp_path)
+
+
+def test_zero_jog_does_not_cancel_preset_move(tmp_path):
+    """A client sending neutral stick values (or a drifting gamepad inside
+    the deadband) must not kill a running preset move; a real jog must."""
+    async def t(ctrl):
+        await ctrl.home(["pan"])
+        await ctrl.goto({"pan": 0}, wait=True)
+        await ctrl.goto({"pan": 60})
+        for _ in range(5):
+            ctrl.jog({"pan": 0.0, "tilt": 0.0, "zoom": 0.0})
+            await asyncio.sleep(0.02)
+        assert ctrl.status()["motion"] == "move"
+        while ctrl.status()["motion"]:
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
+        assert ctrl.position("pan") == pytest.approx(60, abs=0.05)
+        await ctrl.goto({"pan": -60})
+        await asyncio.sleep(0.05)
+        ctrl.jog({"pan": 0.5})                       # manual override
+        assert ctrl.status()["motion"] == ""
+    run(t, tmp_path)
+
+
+def test_motion_settings_persist(tmp_path):
+    async def t(ctrl):
+        r = await dispatch(ctrl, {"cmd": "set_motion", "accel": 0.25, "smoothing": 0.8})
+        assert r["ok"] and ctrl.accel == 0.25 and ctrl.smoothing == 0.8
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["accel"] == 0.25 and data["smoothing"] == 0.8
+    run(t, tmp_path)
+
+
+def test_record_continuous_and_replay(tmp_path):
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+        assert (await dispatch(ctrl, {"cmd": "record_start", "name": "sweep"}))["ok"]
+        await ctrl.goto({"pan": 40, "tilt": 20}, wait=True)
+        await ctrl.goto({"pan": -20, "tilt": 10}, wait=True)
+        r = await dispatch(ctrl, {"cmd": "record_stop"})
+        assert r["ok"] and r["recording"]["name"] == "sweep"
+        assert r["recording"]["points"] > 10
+        duration = r["recording"]["duration"]
+        await ctrl.goto({"pan": 100, "tilt": -30}, wait=True)
+        # replay at 2x: goes back to the start, plays, ends where recording ended
+        loop = asyncio.get_running_loop()
+        assert (await dispatch(ctrl, {"cmd": "play", "name": "sweep", "speed": 2.0}))["ok"]
+        t0 = None
+        while ctrl.playback is not None:
+            if t0 is None and ctrl.playback["phase"] == "playing":
+                t0 = loop.time()
+            await asyncio.sleep(0.02)
+        played = loop.time() - t0
+        assert played < duration * 0.75
+        await asyncio.sleep(0.3)
+        assert ctrl.position("pan") == pytest.approx(-20, abs=0.1)
+        assert ctrl.position("tilt") == pytest.approx(10, abs=0.1)
+    run(t, tmp_path)
+
+
+def test_record_keypoints_loop_and_stop(tmp_path):
+    async def t(ctrl):
+        await ctrl.home(["pan"])
+        await ctrl.goto({"pan": 0}, wait=True)
+        ctrl.record_start("keypoints", "kp")
+        with pytest.raises(Exception):
+            ctrl.record_start("keypoints")             # already recording
+        await ctrl.goto({"pan": 30}, wait=True)
+        assert ctrl.record_keypoint() == 2
+        await ctrl.goto({"pan": 10}, wait=True)
+        assert ctrl.record_keypoint() == 3
+        summary = ctrl.record_stop()
+        assert summary["points"] == 3 and summary["mode"] == "keypoints"
+        await ctrl.play("kp", speed=4.0, loop=True)
+        passes = 0
+        for _ in range(400):
+            await asyncio.sleep(0.02)
+            passes = ctrl.playback["pass"]
+            if passes >= 2:
+                break
+        assert passes >= 2                               # looped
+        assert (await dispatch(ctrl, {"cmd": "play_stop"}))["ok"]
+        assert ctrl.playback is None
+        lst = (await dispatch(ctrl, {"cmd": "recordings"}))["recordings"]
+        assert [r["name"] for r in lst] == ["kp"]
+        assert (await dispatch(ctrl, {"cmd": "recording_delete", "name": "kp"}))["ok"]
+    run(t, tmp_path)
+
+
+def test_move_onto_end_of_travel_switch_completes(tmp_path):
+    """Zoom-like axis: switch at position_min. Going to the limit lands on the
+    switch; the MCU guard halts it there and the move must still complete."""
+    text = FAST_CFG.replace("[axis zoom]\n", "[axis zoom]\nendstop_pin: ^gpio25\n"
+                            "homing_speed: 200\nsecond_homing_speed: 50\n")
+
+    async def t(ctrl):
+        assert ctrl.axis("zoom").endstop_guard
+        await ctrl.home(["zoom"])
+        await ctrl.goto({"zoom": 30}, wait=True)
+        await asyncio.wait_for(ctrl.goto({"zoom": 0}, wait=True), 5)
+        assert ctrl.position("zoom") == pytest.approx(0, abs=0.2)
+    run(t, tmp_path, text)

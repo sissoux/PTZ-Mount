@@ -84,6 +84,10 @@ def main() -> None:
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    from . import weblog
+    weblog.install()
+    if args.verbose:
+        weblog.set_debug(True)
     try:
         asyncio.run(run(args))
     except ConfigError as e:

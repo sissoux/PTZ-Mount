@@ -11,7 +11,10 @@
     <h1>PTZ</h1>
     <span id="conn" class="badge off">offline</span>
     <span id="estop-badge" class="badge danger hidden">E-STOP</span>
+    <span id="rec-badge" class="badge rec hidden">● REC</span>
+    <span id="play-badge" class="badge play hidden">▶ PLAY</span>
     <span id="error" class="error"></span>
+    <label class="debug-toggle"><input id="debug-mode" type="checkbox"> Debug</label>
     <button id="btn-estop" class="estop">E-STOP</button>
   </header>
 
@@ -21,15 +24,21 @@
       <div id="pad" class="pad"><div id="knob" class="knob"></div></div>
       <div class="zoom">
         <label>Zoom</label>
-        <input id="zoom" type="range" min="-1" max="1" step="0.01" value="0" orient="vertical">
+        <input id="zoom" type="range" min="-1" max="1" step="0.01" value="0">
       </div>
-      <div class="row">
+      <div class="sliders">
         <label for="speed">Speed</label>
         <input id="speed" type="range" min="0.05" max="1" step="0.05" value="1">
-        <span id="speed-val">100%</span>
+        <span id="speed-val" class="val">100%</span>
+        <label for="accel">Acceleration</label>
+        <input id="accel" type="range" min="0.05" max="1" step="0.05" value="1">
+        <span id="accel-val" class="val">100%</span>
+        <label for="smoothing">Ease in/out</label>
+        <input id="smoothing" type="range" min="0" max="1" step="0.05" value="0.3">
+        <span id="smoothing-val" class="val">30%</span>
       </div>
-      <p class="hint">Keyboard: arrows = pan/tilt, PgUp/PgDn = zoom, Space = stop, Esc = E-stop.
-        A gamepad plugged into this computer also works.</p>
+      <p class="hint">Keyboard: arrows = pan/tilt (Shift = slow), PgUp/PgDn = zoom,
+        Space = stop, Esc = E-stop. A gamepad plugged into this computer also works.</p>
     </section>
 
     <section class="card">
@@ -43,7 +52,6 @@
         <button id="btn-stop">Stop</button>
         <button id="btn-enable">Motors on</button>
         <button id="btn-disable">Motors off</button>
-        <button id="btn-clear">Clear E-stop</button>
       </div>
     </section>
 
@@ -53,6 +61,49 @@
         <label><input id="save-mode" type="checkbox"> Save mode (click a preset to store current position)</label>
       </div>
       <div id="presets" class="presets"></div>
+    </section>
+
+    <section class="card recorder">
+      <h2>Record &amp; replay</h2>
+      <div class="row">
+        <select id="rec-mode" title="Continuous: the whole path is recorded. Keypoints: only the points you add, replayed smoothly.">
+          <option value="continuous">Continuous path</option>
+          <option value="keypoints">Keypoints</option>
+        </select>
+        <input id="rec-name" type="text" placeholder="name (optional)">
+        <button id="btn-rec" class="rec-btn">● Record</button>
+        <button id="btn-keypoint" disabled>+ Keypoint</button>
+        <button id="btn-rec-cancel" class="hidden">Cancel</button>
+      </div>
+      <div id="rec-status" class="muted"></div>
+
+      <div class="sliders replay">
+        <label for="play-speed">Replay speed</label>
+        <input id="play-speed" type="range" min="-3.32" max="2" step="0.01" value="0">
+        <span id="play-speed-val" class="val">1.00×</span>
+      </div>
+      <div class="row">
+        <label><input id="play-loop" type="checkbox"> Loop</label>
+        <button id="btn-play-stop" disabled>■ Stop replay</button>
+        <div class="progress"><div id="play-progress"></div></div>
+      </div>
+      <div id="play-status" class="muted"></div>
+      <table id="recordings"><tbody></tbody></table>
+    </section>
+
+    <section id="debug-card" class="card debug hidden">
+      <h2>Debug console</h2>
+      <div class="row">
+        <select id="log-level">
+          <option value="DEBUG">All messages</option>
+          <option value="INFO" selected>Info and above</option>
+          <option value="WARNING">Warnings and errors</option>
+        </select>
+        <label><input id="log-autoscroll" type="checkbox" checked> Auto-scroll</label>
+        <button id="btn-log-clear">Clear</button>
+        <button id="btn-diag">Run diagnostics</button>
+      </div>
+      <div id="console" class="console"></div>
     </section>
   </main>
 

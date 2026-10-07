@@ -58,7 +58,7 @@ class UdpServer(asyncio.DatagramProtocol):
         asyncio.get_running_loop().create_task(self._handle(msg, addr))
 
     async def _handle(self, msg, addr) -> None:
-        reply = await dispatch(self.ctrl, msg)
+        reply = await dispatch(self.ctrl, msg, source=f"udp {addr[0]}")
         if (isinstance(msg, dict) and "id" in msg) or not reply["ok"]:
             if isinstance(msg, dict):
                 reply["id"] = msg.get("id")

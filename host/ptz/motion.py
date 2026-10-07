@@ -3,29 +3,38 @@
 Responsibilities
   * configure the MCU (pins, limits, TMC2209 registers) from ptz.cfg
   * convert user units <-> microsteps
-  * jog: normalized joystick values -> velocity stream (with deadband/expo)
-  * goto: synchronized multi-axis point-to-point moves
+  * motion shaping, streamed to the MCU as velocities at ~100 Hz:
+      - jog: joystick values -> deadband/expo -> accel + ease in/out shaper
+      - goto / presets: synchronized multi-axis S-curve moves
+      - playback of recorded movements, at a variable speed, once or in loop
   * homing sequence (fast approach, retract, slow approach, set position)
-  * presets, enable/disable, stop / emergency stop
+  * presets, recordings, enable/disable, stop / emergency stop
   * aggregate status for the API layer
 
-All real-time work (ramps, step pulses, endstop checks, soft limits) is done
-by the RP2040. Nothing here is time critical beyond ~10 ms.
+The RP2040 does the hard real-time part (step pulses, endstop halt, hard
+acceleration cap, soft limits, watchdog). A late host tick only means a
+velocity is held a few ms longer; every move ends with an exact MOVE_TO.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import protocol as P
 from . import tmc2209
 from .config import AxisConfig, PtzConfig
 from .mcu import McuError, McuLink
 from .presets import PresetStore
+from .recorder import Recorder
+from .trajectory import (MoveTrajectory, PlaybackTrajectory, VelocityShaper, braking_speed,
+                         clamp)
 
 log = logging.getLogger("ptz.motion")
 
@@ -43,15 +52,12 @@ class AxisState:
     jog_value: float = 0.0    # shaped, -1..1
     jog_time: float = 0.0
     jog_active: bool = False
+    braking: bool = False     # jog currently limited by the soft-limit approach
 
 
-def trapezoid_time(dist: float, vmax: float, accel: float) -> float:
-    dist = abs(dist)
-    if dist == 0 or vmax <= 0 or accel <= 0:
-        return 0.0
-    if dist >= vmax * vmax / accel:
-        return dist / vmax + vmax / accel
-    return 2.0 * math.sqrt(dist / accel)
+KP = 2.0                      # position feedback gain while streaming (1/s)
+FEEDBACK_LATENCY = 0.004      # s, host receive time vs MCU position sample
+SETTINGS = ("speed", "accel", "smoothing", "play_speed")
 
 
 class MotionController:
@@ -61,7 +67,24 @@ class MotionController:
         self.axes: List[AxisConfig] = sorted(cfg.axes.values(), key=lambda a: a.index)
         self.state: Dict[str, AxisState] = {a.name: AxisState() for a in self.axes}
         self.presets = PresetStore(os.path.join(cfg.server.state_dir, "presets.json"))
+        m = cfg.motion
         self.speed = 1.0                      # global speed factor 0..1
+        self.accel = m.accel                  # acceleration factor 0..1
+        self.smoothing = m.smoothing          # ease in/out 0..1
+        self.play_speed = 1.0                 # replay speed factor
+        self.play_loop = False
+        self._settings_path = os.path.join(cfg.server.state_dir, "settings.json")
+        self._load_settings()
+        self.recorder = Recorder(os.path.join(cfg.server.state_dir, "recordings"),
+                                 self._homed_positions, time.monotonic)
+        self.playback: Optional[dict] = None
+        self._play_task: Optional[asyncio.Task] = None
+        self._traj = None                     # MoveTrajectory | PlaybackTrajectory
+        self._traj_kind = ""
+        self._traj_future: Optional[asyncio.Future] = None
+        self._shapers = {a.name: VelocityShaper() for a in self.axes}
+        self._cmd_vel = {a.name: 0.0 for a in self.axes}       # last streamed, units/s
+        self._des_hist: Deque[Tuple[float, Dict[str, float]]] = deque(maxlen=100)
         self.sys_flags = 0
         self.connected = False
         self.ready = False
@@ -78,9 +101,10 @@ class MotionController:
         await self.link.start()
         loop = asyncio.get_running_loop()
         self._tasks.append(loop.create_task(self._supervisor()))
-        self._tasks.append(loop.create_task(self._jog_loop()))
+        self._tasks.append(loop.create_task(self._stream_loop()))
 
     async def close(self) -> None:
+        self._cancel_motion()
         for t in self._tasks:
             t.cancel()
         try:
@@ -143,7 +167,8 @@ class MotionController:
                 dir_pin=ax.dir_pin.gpio, enable_pin=ax.enable_pin.gpio,
                 endstop_pin=ax.endstop_pin.gpio, flags=flags, endstop_dir=es_dir,
                 max_vel=ax.max_velocity * spu, max_accel=ax.max_accel * spu,
-                vel_accel=ax.jog_accel * spu)
+                # the host shapes jog/moves; the MCU follows up to its hard cap
+                vel_accel=ax.max_accel * spu)
             self.state[ax.name].homed = False
         self.ready = True
         self.last_error = ""
@@ -171,6 +196,7 @@ class MotionController:
     # ================================================================ MCU callbacks
     def _on_status(self, msg: P.Message) -> None:
         self._last_status = asyncio.get_running_loop().time()
+        self.recorder.on_status()
         self.sys_flags = msg["sys_flags"]
         for ax, (pos, vel, flags) in zip(self.axes, P.status_axes(msg)):
             st = self.state[ax.name]
@@ -187,15 +213,27 @@ class MotionController:
             self.ready = False
             for st in self.state.values():
                 st.homed = False
+            self._cancel_motion()
             self._fail_waiters(MotionError("MCU rebooted"))
             return
         if etype == P.EV_ENDSTOP_HIT:
-            log.warning("axis %d hit its endstop outside homing", axis)
+            ax = self.axes[axis] if axis < len(self.axes) else None
+            if ax is not None and self._near_endstop_limit(ax, msg["value"]):
+                log.info("%s stopped on its end-of-travel switch", ax.name)
+            else:
+                log.warning("%s hit its endstop outside homing (at %s)",
+                            ax.name if ax else axis,
+                            f"{ax.to_units(msg['value']):.2f}" if ax else msg["value"])
         elif etype == P.EV_WATCHDOG:
-            log.info("MCU watchdog: jog stopped (no command received in time)")
+            log.info("MCU watchdog: motion stopped (no command received in time)")
+        else:
+            log.debug("MCU event %s axis=%d value=%d",
+                      P.EVENT_NAMES.get(etype, etype), axis, msg["value"])
         for w in list(self._waiters):
             w_axis, types, fut = w
-            if w_axis == axis and etype in types and not fut.done():
+            if fut.done():
+                self._waiters.remove(w)
+            elif w_axis == axis and etype in types:
                 fut.set_result(msg)
                 self._waiters.remove(w)
 
@@ -233,6 +271,51 @@ class MotionController:
     def positions(self) -> Dict[str, float]:
         return {a.name: self.position(a.name) for a in self.axes}
 
+    @staticmethod
+    def _near_endstop_limit(ax: AxisConfig, steps: int) -> bool:
+        """True if `steps` is at the soft limit on the switch side (+-1 unit)."""
+        if not ax.endstop_guard:
+            return False
+        lim = ax.position_max if ax.homing_positive_dir else ax.position_min
+        return abs(ax.to_units(steps) - lim) <= 1.0
+
+    def _homed_positions(self) -> Dict[str, float]:
+        return {a.name: self.position(a.name) for a in self.axes if self.state[a.name].homed}
+
+    # ================================================================ settings
+    def _load_settings(self) -> None:
+        try:
+            with open(self._settings_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        for k in SETTINGS:
+            if isinstance(data.get(k), (int, float)):
+                setattr(self, k, float(data[k]))
+
+    def _save_settings(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
+            with open(self._settings_path, "w", encoding="utf-8") as f:
+                json.dump({k: getattr(self, k) for k in SETTINGS}, f)
+        except OSError as e:
+            log.warning("cannot save settings: %s", e)
+
+    def set_motion(self, speed: Optional[float] = None, accel: Optional[float] = None,
+                   smoothing: Optional[float] = None) -> None:
+        """Global speed, acceleration (fractions of the configured maxima)
+        and ease in/out amount (0 = sharp, 1 = softest)."""
+        if speed is not None:
+            self.speed = clamp(float(speed), 0.01, 1.0)
+        if accel is not None:
+            self.accel = clamp(float(accel), 0.02, 1.0)
+        if smoothing is not None:
+            self.smoothing = clamp(float(smoothing), 0.0, 1.0)
+        self._save_settings()
+
+    def _smooth_time(self) -> float:
+        return self.smoothing * self.cfg.motion.ease_time
+
     # ================================================================ jog
     def _shape(self, v: float) -> float:
         m = self.cfg.motion
@@ -246,86 +329,193 @@ class MotionController:
 
     def jog(self, values: Dict[str, float]) -> None:
         """Normalized velocity command (-1..1) per axis. Must be refreshed
-        by the caller at least every motion.jog_timeout seconds."""
+        by the caller at least every motion.jog_timeout seconds.
+
+        A non-zero jog on an axis that is running a move or a replay takes
+        over (manual override). Zero values never interrupt a move."""
         if not self.ready or self.estopped:
             return
         now = asyncio.get_running_loop().time()
-        for name, v in values.items():
-            if name not in self.state or name in self._homing:
+        shaped = {n: self._shape(v) for n, v in values.items()
+                  if n in self.state and n not in self._homing}
+        if self._traj is not None and any(v != 0.0 and n in self._traj.axes
+                                          for n, v in shaped.items()):
+            log.info("manual jog: %s interrupted", self._traj_kind or "move")
+            self._cancel_motion(handover=True)
+        for name, v in shaped.items():
+            if self._traj is not None and name in self._traj.axes:
                 continue
             st = self.state[name]
-            st.jog_value, st.jog_time, st.jog_active = self._shape(v), now, True
-        self._send_jog(now)
-
-    def _send_jog(self, now: float) -> None:
-        mask, vels = 0, [0.0] * P.MAX_AXES
-        timeout = self.cfg.motion.jog_timeout
-        for ax in self.axes:
-            st = self.state[ax.name]
-            if not st.jog_active:
-                continue
-            mask |= 1 << ax.index
-            if now - st.jog_time > timeout:
-                st.jog_active = False         # send one last zero
-                st.jog_value = 0.0
-            vels[ax.index] = st.jog_value * ax.jog_velocity * self.speed * ax.steps_per_unit
-        if mask:
-            self.link.send("SET_VELOCITY", axis_mask=mask, v0=vels[0], v1=vels[1],
-                           v2=vels[2], v3=vels[3])
-
-    async def _jog_loop(self) -> None:
-        """Re-send the jog vector so the MCU watchdog stays fed while a
-        client is actively jogging, and stale jog sources get zeroed."""
-        loop = asyncio.get_running_loop()
-        while True:
-            await asyncio.sleep(0.05)
-            if self.ready:
-                self._send_jog(loop.time())
+            st.jog_value, st.jog_time, st.jog_active = v, now, True
 
     def _cancel_jog(self, names: Iterable[str]) -> None:
         for n in names:
             st = self.state[n]
             st.jog_active, st.jog_value = False, 0.0
+            self._shapers[n].reset(0.0)
+
+    # ================================================================ streaming
+    async def _stream_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        period = 1.0 / self.cfg.motion.stream_rate
+        next_t = last = loop.time()
+        while True:
+            next_t += period
+            delay = next_t - loop.time()
+            if delay < -0.1:                          # fell far behind: resync
+                next_t = loop.time()
+            await asyncio.sleep(max(0.0, delay))
+            now = loop.time()
+            dt, last = min(0.05, now - last), now
+            if not self.ready:
+                continue
+            if self.estopped:
+                if self._traj is not None:
+                    self._cancel_motion()
+                continue
+            try:
+                self._stream_tick(now, dt)
+            except Exception:  # noqa: BLE001
+                log.exception("stream tick failed")
+
+    def _desired_at(self, t: float) -> Optional[Dict[str, float]]:
+        for ts, pos in reversed(self._des_hist):
+            if ts <= t:
+                return pos
+        return None
+
+    def _stream_tick(self, now: float, dt: float) -> None:
+        mask, vels = 0, [0.0] * P.MAX_AXES
+        traj = self._traj
+        if traj is not None:
+            traj.advance(dt)
+            samples = traj.sample()
+            self._des_hist.append((now, {n: p for n, (p, _) in samples.items()}))
+            ref = None
+            if now - self._last_status < 0.1:
+                ref = self._desired_at(self._last_status - FEEDBACK_LATENCY)
+            for name, (p, v) in samples.items():
+                ax = self.cfg.axes[name]
+                if ref is not None and name in ref:
+                    corr = KP * (ref[name] - self.position(name))
+                    v += clamp(corr, -0.1 * ax.max_velocity, 0.1 * ax.max_velocity)
+                v = clamp(v, -ax.max_velocity, ax.max_velocity)
+                self._cmd_vel[name] = v
+                mask |= 1 << ax.index
+                vels[ax.index] = v * ax.steps_per_unit
+            if traj.done:
+                self._finish_traj(traj)
+
+        timeout = self.cfg.motion.jog_timeout
+        smooth = self._smooth_time()
+        for ax in self.axes:
+            name = ax.name
+            if (traj is not None and name in traj.axes) or name in self._homing:
+                continue
+            st, sh = self.state[name], self._shapers[name]
+            if not st.jog_active and sh.v == 0.0:
+                continue
+            if st.jog_active and now - st.jog_time > timeout:
+                st.jog_active, st.jog_value = False, 0.0
+            amax = ax.jog_accel * self.accel
+            jerk = amax / smooth if smooth > 1e-3 else math.inf
+            target = st.jog_value * ax.jog_velocity * self.speed
+            st.braking = False
+            if st.homed:                              # ease into the soft limits
+                pos = self.position(name)
+                up = braking_speed(ax.position_max - pos, amax, smooth)
+                dn = braking_speed(pos - ax.position_min, amax, smooth)
+                if target > up or target < -dn:
+                    target = clamp(target, -dn, up)
+                    st.braking = True
+            v = sh.step(target, amax, jerk, dt)
+            self._cmd_vel[name] = v
+            mask |= 1 << ax.index
+            vels[ax.index] = v * ax.steps_per_unit
+        if mask:
+            self.link.send("SET_VELOCITY", axis_mask=mask, v0=vels[0], v1=vels[1],
+                           v2=vels[2], v3=vels[3])
+
+    # ================================================================ trajectories
+    def _start_traj(self, traj, kind: str) -> asyncio.Future:
+        self._cancel_traj()
+        self._cancel_jog(traj.axes)
+        self._des_hist.clear()
+        fut = asyncio.get_running_loop().create_future()
+        self._traj, self._traj_kind, self._traj_future = traj, kind, fut
+        log.debug("%s started: %s (%.2f s)", kind,
+                  {n: round(v, 2) for n, v in traj.final.items()}, traj.duration)
+        return fut
+
+    def _finish_traj(self, traj) -> None:
+        fut = self._traj_future
+        self._traj, self._traj_kind, self._traj_future = None, "", None
+        for n in traj.axes:
+            self._cmd_vel[n] = 0.0
+        asyncio.get_running_loop().create_task(self._snap(traj, fut))
+
+    async def _snap(self, traj, fut: Optional[asyncio.Future]) -> None:
+        """Land exactly on the final positions with an MCU position move."""
+        try:
+            waits = []
+            for name, target in traj.final.items():
+                ax = self.cfg.axes[name]
+                spu = ax.steps_per_unit
+                # landing on an end-of-travel switch halts the axis: that is "done" too
+                waits.append(self._expect(ax.index, P.EV_MOVE_DONE, P.EV_ENDSTOP_HIT))
+                await self.link.request("MOVE_TO", axis=ax.index, target=ax.to_steps(target),
+                                        max_vel=ax.max_velocity * spu * 0.5,
+                                        accel=ax.max_accel * spu)
+            await asyncio.wait_for(asyncio.gather(*waits), 3.0)
+            if fut is not None and not fut.done():
+                fut.set_result(True)
+        except Exception as e:  # noqa: BLE001
+            if fut is not None and not fut.done():
+                fut.set_exception(MotionError(f"move did not complete: {e}"))
+
+    def _cancel_traj(self, handover: bool = False) -> None:
+        traj, fut = self._traj, self._traj_future
+        self._traj, self._traj_kind, self._traj_future = None, "", None
+        if traj is not None:
+            for n in traj.axes:      # continue smoothly from the streamed speed
+                self._shapers[n].reset(self._cmd_vel[n] if handover else 0.0)
+        if fut is not None and not fut.done():
+            fut.set_exception(MotionError("move interrupted"))
+
+    def _cancel_motion(self, handover: bool = False) -> None:
+        """Stop any running move and replay (jog sources are kept)."""
+        if self._play_task is not None and not self._play_task.done():
+            self._play_task.cancel()
+        self._play_task = None
+        self.playback = None
+        self._cancel_traj(handover)
 
     # ================================================================ moves
     async def goto(self, targets: Dict[str, float], speed: float = 1.0,
                    wait: bool = False) -> None:
-        """Absolute move in user units. All axes arrive at the same time."""
+        """Absolute move in user units. All axes arrive at the same time,
+        with the current acceleration and ease in/out settings."""
         self._check_ready()
-        speed = max(0.01, min(1.0, speed)) * self.speed
-        plan = []
+        k = max(0.01, min(1.0, speed)) * self.speed
+        start, final, vmax, amax = {}, {}, {}, {}
         for name, target in targets.items():
             ax = self.axis(name)
-            st = self.state[name]
-            if not st.homed:
+            if not self.state[name].homed:
                 raise MotionError(f"axis '{name}' is not homed")
             if name in self._homing:
                 raise MotionError(f"axis '{name}' is homing")
-            target = max(ax.position_min, min(ax.position_max, float(target)))
-            d = ax.to_steps(target) - st.pos
-            vmax = ax.max_velocity * ax.steps_per_unit * speed
-            acc = ax.max_accel * ax.steps_per_unit
-            plan.append([ax, ax.to_steps(target), d, vmax, acc])
-        if not plan:
+            final[name] = max(ax.position_min, min(ax.position_max, float(target)))
+            start[name] = self.position(name)
+            vmax[name] = ax.max_velocity * k
+            amax[name] = ax.max_accel * self.accel
+        if not final:
             return
-        # synchronize: scale every profile onto the slowest one
-        lead = max(plan, key=lambda p: trapezoid_time(p[2], p[3], p[4]))
-        if lead[2] != 0:
-            for p in plan:
-                if p is lead:
-                    continue
-                k = abs(p[2] / lead[2])
-                p[3] = min(p[3], lead[3] * k) or p[3]
-                p[4] = min(p[4], lead[4] * k) or p[4]
-        self._cancel_jog(p[0].name for p in plan)
-        futs = []
-        for ax, target, d, vmax, acc in plan:
-            if wait:
-                futs.append(self._expect(ax.index, P.EV_MOVE_DONE))
-            await self.link.request("MOVE_TO", axis=ax.index, target=target,
-                                    max_vel=vmax, accel=acc)
-        if futs:
-            await asyncio.gather(*futs)
+        fut = self._start_traj(MoveTrajectory(start, final, vmax, amax, self._smooth_time()),
+                               "move")
+        if wait:
+            await fut
+        else:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     async def move_relative(self, deltas: Dict[str, float], speed: float = 1.0,
                             wait: bool = False) -> None:
@@ -334,6 +524,7 @@ class MotionController:
 
     async def stop(self, names: Optional[Iterable[str]] = None) -> None:
         names = list(names) if names else [a.name for a in self.axes]
+        self._cancel_motion()
         self._cancel_jog(names)
         mask = 0
         for n in names:
@@ -341,6 +532,9 @@ class MotionController:
         await self.link.request("STOP", axis_mask=mask)
 
     async def estop(self) -> None:
+        self._cancel_motion()
+        if self.recorder.active:
+            self.recorder.cancel()
         self._cancel_jog(self.state.keys())
         await self.link.request("ESTOP", retries=3)
         self._fail_waiters(MotionError("emergency stop"))
@@ -494,6 +688,81 @@ class MotionController:
         await self.goto({k: v for k, v in pos.items() if k in self.state},
                         speed=speed, wait=wait)
 
+    # ================================================================ recording / replay
+    def record_start(self, mode: str = "continuous", name: str = "") -> None:
+        self.recorder.start(mode, name)
+        log.info("recording started (%s)", mode)
+
+    def record_keypoint(self) -> int:
+        n = self.recorder.keypoint()
+        log.info("keypoint %d recorded", n)
+        return n
+
+    def record_stop(self) -> dict:
+        summary = self.recorder.stop()
+        log.info("recording '%s' saved: %d points, %.1f s", summary["name"],
+                 summary["points"], summary["duration"])
+        return summary
+
+    def set_play(self, speed: Optional[float] = None, loop: Optional[bool] = None) -> None:
+        if speed is not None:
+            self.play_speed = clamp(float(speed), 0.1, 4.0)
+            self._save_settings()
+        if loop is not None:
+            self.play_loop = bool(loop)
+        if self.playback is not None:
+            self.playback["loop"] = self.play_loop
+
+    async def play(self, name: str, speed: Optional[float] = None,
+                   loop: Optional[bool] = None) -> None:
+        """Start replaying a recording (returns immediately)."""
+        self._check_ready()
+        rec = self.recorder.load(name)
+        axes = [n for n in rec["points"][0]["pos"] if n in self.state]
+        if not axes:
+            raise MotionError("recording uses no configured axis")
+        for n in axes:
+            if not self.state[n].homed:
+                raise MotionError(f"axis '{n}' is not homed")
+        self._cancel_motion()
+        self.set_play(speed, loop)
+        self.playback = {"name": rec["name"], "phase": "positioning", "progress": 0.0,
+                         "loop": self.play_loop, "pass": 1,
+                         "duration": rec.get("duration", 0)}
+        self._play_task = asyncio.get_running_loop().create_task(self._play_run(rec, axes))
+
+    async def _play_run(self, rec: dict, axes: List[str]) -> None:
+        pts = [{"t": p["t"], "pos": {n: p["pos"][n] for n in axes}} for p in rec["points"]]
+        vmax = {n: self.cfg.axes[n].max_velocity for n in axes}
+        state = self.playback
+        try:
+            while True:
+                state["phase"] = "positioning"
+                await self.goto(pts[0]["pos"], wait=True)
+                state["phase"] = "playing"
+                traj = PlaybackTrajectory(pts, vmax, lambda: self.play_speed)
+                await self._start_traj(traj, "playback")
+                if not self.play_loop:
+                    break
+                state["pass"] += 1
+            log.info("replay of '%s' finished", rec["name"])
+        except MotionError as e:
+            log.info("replay of '%s' stopped: %s", rec["name"], e)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.playback is state:
+                self.playback = None
+                self._play_task = None
+
+    async def play_stop(self) -> None:
+        if self.playback is None:
+            return
+        names = list(self._traj.axes) if self._traj is not None else None
+        self._cancel_motion()
+        if names:
+            await self.stop(names)
+
     # ================================================================ status
     def status(self) -> dict:
         axes = {}
@@ -508,15 +777,27 @@ class MotionController:
                 "enabled": bool(f & P.ST_ENABLED),
                 "moving": bool(f & P.ST_MOVING),
                 "endstop": bool(f & P.ST_ENDSTOP),
-                "at_limit": bool(f & P.ST_AT_LIMIT),
+                "at_limit": bool(f & P.ST_AT_LIMIT) or st.braking,
                 "min": ax.position_min,
                 "max": ax.position_max,
             }
+        playback = None
+        if self.playback is not None:
+            playback = dict(self.playback)
+            if self._traj_kind == "playback" and self._traj is not None:
+                playback["progress"] = round(self._traj.progress, 3)
         return {
             "connected": self.connected,
             "ready": self.ready,
             "estop": self.estopped,
             "speed": self.speed,
+            "accel": self.accel,
+            "smoothing": self.smoothing,
+            "play_speed": self.play_speed,
+            "play_loop": self.play_loop,
+            "motion": self._traj_kind,
+            "playback": playback,
+            "recording": self.recorder.state(),
             "error": self.last_error,
             "axes": axes,
         }

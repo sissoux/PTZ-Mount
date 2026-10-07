@@ -72,6 +72,22 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
 | JSON over UDP | 9000 | Lowest latency, network joysticks |
 | VISCA over IP | UDP 52381 | PTZ keyboards, Bitfocus Companion, OBS, vMix |
 
+## Web UI features
+
+* **Live control**: pad, zoom rocker, keyboard, gamepad, presets.
+* **Speed, Acceleration, Ease in/out** sliders: apply to jogging, moves,
+  presets and the move to the start of a replay. Values are stored on the Pi.
+* **Record & replay**: press Record, move the head by any means (web,
+  gamepad, UDP joystick, VISCA, presets), press Stop.
+  * *Continuous path* records the real path.
+  * *Keypoints* records only the points you add with "+ Keypoint", with
+    their timing, and replays a smooth curve through them.
+  * Replay once or in a loop, at 0.1x to 4x, adjustable while playing. The
+    head first moves to the start point. Any manual jog takes over.
+* **Debug mode** (top right): verbose logging and a live console showing
+  every command, rejection, MCU event and endstop change, plus a driver
+  diagnostics button.
+
 All of them share the same command set, documented in
 [host/ptz/api/commands.py](host/ptz/api/commands.py). Example:
 

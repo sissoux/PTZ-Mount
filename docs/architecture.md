@@ -76,6 +76,26 @@ whatever it is told last. So the planning moves into the MCU, in
 The firmware is **board-agnostic**: every pin arrives from the host at startup
 (`CONFIG_AXIS`). Only the host UART pins are compiled in (`firmware/src/config.h`).
 
+## Motion shaping
+
+Since v0.2 the Pi shapes all motion and streams velocities to the RP2040
+at `stream_rate` (100 Hz) with `SET_VELOCITY`. The MCU follows, limited by
+its hard `max_accel`, and keeps every safety function. All shaping code is in
+`host/ptz/trajectory.py`.
+
+* **Jog**: a jerk-limited velocity follower (acceleration + ease in/out),
+  which also brakes smoothly before the soft limits.
+* **Moves and presets**: a synchronized S-curve. A trapezoid is filtered by a
+  moving average of `smoothing x ease_time` seconds, which gives linear
+  acceleration ramps. A slow position correction compensates timing jitter,
+  and every move ends with an exact `MOVE_TO`.
+* **Replay**: a monotone cubic spline (PCHIP) through the recorded points, so
+  it never overshoots. Time is scaled by the speed factor and slowed down
+  locally where an axis would exceed its max velocity.
+
+A zero jog value never interrupts a move. A non-zero jog on an axis that is
+moving or replaying takes over, continuing from the current speed.
+
 ## Latency budget (joystick to motor)
 
 | Step | Typical |

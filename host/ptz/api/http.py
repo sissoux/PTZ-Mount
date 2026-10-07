@@ -185,6 +185,7 @@ class HttpServer:
         log.info("web client connected: %s [%s], %d connected",
                  me.label, me.id, len(self.clients))
         jogging = set()
+        last_jog_error = 0.0
         try:
             await ws.send_str(json.dumps({"type": "config", **config_summary(self.ctrl)}))
             await ws.send_str(json.dumps({"type": "presets",
@@ -214,7 +215,13 @@ class HttpServer:
                     jogging.update(k for k in msg if k in self.ctrl.state)
                 reply = await dispatch(self.ctrl, msg, source=me.label, client=me.id,
                                        local=me.ip in LOCAL_ADDRESSES)
-                if "id" in msg or (not reply["ok"] and msg.get("cmd") != "jog"):
+                send_reply = "id" in msg or not reply["ok"]
+                if not reply["ok"] and msg.get("cmd") == "jog":   # sent 25x/s: rate-limit
+                    now = time.monotonic()
+                    send_reply = now - last_jog_error > 1.0
+                    if send_reply:
+                        last_jog_error = now
+                if send_reply:
                     reply.update(type="reply", id=msg.get("id"), cmd=msg.get("cmd"))
                     await ws.send_str(json.dumps(reply))
                 if "presets" in reply:

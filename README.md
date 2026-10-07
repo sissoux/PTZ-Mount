@@ -76,6 +76,10 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
 
 * **Live control**: pad, zoom rocker, keyboard, gamepad, presets, and a
   large position readout per axis (unit label set by `units:` in each axis).
+* **Homing first**: an axis that is not homed cannot move at all, whether
+  by jog, move, preset or replay, from any source. Homing itself is always
+  allowed. Releasing the motors or a board reboot clears the homing. Set
+  `require_homing: False` in `[motion]` to allow jogging unhomed axes.
 * **Speed and Acceleration in real units** (°/s, °/s²) for jogging, moves,
   presets and the move to the start of a replay. One value for all axes,
   capped by each axis maximum, or separate values per axis with

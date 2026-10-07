@@ -411,3 +411,34 @@ def test_move_onto_end_of_travel_switch_completes(tmp_path):
         await asyncio.wait_for(ctrl.goto({"zoom": 0}, wait=True), 5)
         assert ctrl.position("zoom") == pytest.approx(0, abs=0.2)
     run(t, tmp_path, text)
+
+
+def test_unhomed_axis_cannot_move(tmp_path):
+    async def t(ctrl):
+        # jog refused before homing, from any source
+        r = await dispatch(ctrl, {"cmd": "jog", "pan": 1.0, "tilt": 0.0})
+        assert not r["ok"] and "pan not homed" in r["error"]
+        assert ctrl.jog({"tilt": -1.0}) == ["tilt"]
+        await asyncio.sleep(0.3)
+        assert ctrl.state["pan"].vel == 0 and ctrl.state["tilt"].vel == 0
+        assert not (await dispatch(ctrl, {"cmd": "goto", "pan": 10}))["ok"]
+        # homing is always allowed, then the axis moves
+        await ctrl.home(["pan"])
+        assert ctrl.jog({"pan": 0.5, "tilt": 0.5}) == ["tilt"]
+        await asyncio.sleep(0.2)
+        assert ctrl.state["pan"].vel != 0 and ctrl.state["tilt"].vel == 0
+        # motors off: homing lost, motion refused again
+        await ctrl.enable(False, ["pan"])
+        await ctrl.enable(True, ["pan"])
+        assert ctrl.jog({"pan": 0.5}) == ["pan"]
+    run(t, tmp_path)
+
+
+def test_require_homing_can_be_disabled(tmp_path):
+    text = FAST_CFG.replace("[motion]\n", "[motion]\nrequire_homing: False\n")
+
+    async def t(ctrl):
+        assert ctrl.jog({"tilt": 0.5}) == []
+        await asyncio.sleep(0.2)
+        assert ctrl.state["tilt"].vel != 0
+    run(t, tmp_path, text)

@@ -96,7 +96,9 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
     try:
         # ------------------------------------------------ motion
         if cmd == "jog":
-            ctrl.jog(_axis_values(ctrl, msg))
+            refused = ctrl.jog(_axis_values(ctrl, msg))
+            if refused:
+                return _fail(cmd, f"{', '.join(refused)} not homed: home first", quiet=True)
         elif cmd == "goto":
             await ctrl.goto(_axis_values(ctrl, msg), speed=float(msg.get("speed", 1.0)))
         elif cmd == "move_rel":

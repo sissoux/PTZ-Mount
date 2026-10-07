@@ -81,6 +81,7 @@ class MotionController:
         self.lock_owner: Optional[str] = None
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
+        self._refused_log = 0.0
         self.play_speed = 1.0                 # replay speed factor
         self.play_loop = False
         self._settings_path = os.path.join(cfg.server.state_dir, "settings.json")
@@ -227,6 +228,7 @@ class MotionController:
             for st in self.state.values():
                 st.homed = False
             self._cancel_motion()
+            self._cancel_jog(self.state.keys())
             self._fail_waiters(MotionError("MCU rebooted"))
             return
         if etype == P.EV_ENDSTOP_HIT:
@@ -427,17 +429,25 @@ class MotionController:
         a = (1.0 - m.expo) * a + m.expo * a ** 3
         return math.copysign(a, v)
 
-    def jog(self, values: Dict[str, float]) -> None:
+    def jog(self, values: Dict[str, float]) -> List[str]:
         """Normalized velocity command (-1..1) per axis. Must be refreshed
         by the caller at least every motion.jog_timeout seconds.
 
         A non-zero jog on an axis that is running a move or a replay takes
-        over (manual override). Zero values never interrupt a move."""
+        over (manual override). Zero values never interrupt a move.
+        Returns the axes refused because they are not homed."""
         if not self.ready or self.estopped:
-            return
+            return []
         now = asyncio.get_running_loop().time()
         shaped = {n: self._shape(v) for n, v in values.items()
                   if n in self.state and n not in self._homing}
+        refused = []
+        if self.cfg.motion.require_homing:
+            refused = [n for n, v in shaped.items() if v != 0.0 and not self.state[n].homed]
+            shaped = {n: v for n, v in shaped.items() if self.state[n].homed}
+            if refused and now - self._refused_log > 2.0:
+                self._refused_log = now
+                log.warning("jog refused: %s not homed (home first)", ", ".join(refused))
         if self._traj is not None and any(v != 0.0 and n in self._traj.axes
                                           for n, v in shaped.items()):
             log.info("manual jog: %s interrupted", self._traj_kind or "move")
@@ -447,6 +457,7 @@ class MotionController:
                 continue
             st = self.state[name]
             st.jog_value, st.jog_time, st.jog_active = v, now, True
+        return refused
 
     def _cancel_jog(self, names: Iterable[str]) -> None:
         for n in names:
@@ -689,6 +700,7 @@ class MotionController:
             mask |= 1 << self.axis(n).index
             if not on:
                 self.state[n].homed = False     # may move freely while unpowered
+                self._cancel_jog([n])
         await self.link.request("ENABLE", axis_mask=mask, enable_mask=mask if on else 0)
 
     # ================================================================ homing

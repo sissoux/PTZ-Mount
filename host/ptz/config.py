@@ -140,6 +140,7 @@ class MotionConfig:
     smoothing: float = 0.3      # default ease in/out amount 0..1
     ease_time: float = 0.6      # s of acceleration ramp at smoothing = 1
     stream_rate: float = 100.0  # Hz, host -> MCU velocity stream
+    require_homing: bool = True # an axis cannot move at all before it is homed
 
 
 @dataclass
@@ -253,7 +254,8 @@ def load(path: str) -> PtzConfig:
                           home_on_start=home,
                           smoothing=s.getfloat("smoothing", 0.3, 0.0, 1.0),
                           ease_time=s.getfloat("ease_time", 0.6, 0.05, 3.0),
-                          stream_rate=s.getfloat("stream_rate", 100.0, 20.0, 250.0))
+                          stream_rate=s.getfloat("stream_rate", 100.0, 20.0, 250.0),
+                          require_homing=s.getbool("require_homing", True))
 
     tmc_uart = None
     if cp.has_section("tmc_uart"):

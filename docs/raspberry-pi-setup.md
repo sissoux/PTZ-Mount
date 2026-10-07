@@ -5,8 +5,13 @@
 The PTZ daemon needs exclusive use of the serial port.
 
 ```sh
-sudo systemctl disable --now klipper moonraker 2>/dev/null
+for s in klipper moonraker crowsnest KlipperScreen sonar; do
+    sudo systemctl disable --now "$s" 2>/dev/null && echo "disabled $s"
+done
+sudo fuser -v /dev/ttyAMA0          # must print nothing
 ```
+
+Crowsnest (webcam streaming) also listens on port 8080, the PTZ web UI port.
 
 Klipper stays installed and can be re-enabled later. Its MCU firmware is
 replaced by the PTZ firmware, though (see step 3).
@@ -49,7 +54,7 @@ Pi RX (GPIO15) goes to SKR TX (GPIO0), and GND to GND.
 On the Pi (or any Linux/WSL machine):
 
 ```sh
-sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git
+sudo apt install git python3-venv cmake gcc-arm-none-eabi libnewlib-arm-none-eabi \n                 build-essential libusb-1.0-0-dev pkg-config
 cd firmware
 cmake -B build -DPICO_SDK_FETCH_FROM_GIT=ON
 cmake --build build -j4

@@ -148,11 +148,9 @@ class MotionController:
         await self.link.request("SET_STATUS_RATE", rate_hz=c.mcu.status_rate)
         await self.link.request("SET_WATCHDOG",
                                 timeout_ms=int(c.mcu.watchdog_timeout * 1000))
-        if c.tmc_uart:
-            await self.link.request("CONFIG_TMC_UART", rx_pin=c.tmc_uart.rx_pin.gpio,
-                                    tx_pin=c.tmc_uart.tx_pin.gpio, baud=c.tmc_uart.baud)
-            for ax in self.axes:
-                await self._configure_tmc(ax)
+        # Axes first, motors re-energized right away: RESET released the drivers
+        # and the tilt must not stay unpowered while the TMC registers are
+        # written (the drivers keep their previous register values meanwhile).
         for ax in self.axes:
             flags = 0
             flags |= P.AXF_DIR_INVERT if ax.dir_pin.invert else 0
@@ -170,12 +168,17 @@ class MotionController:
                 # the host shapes jog/moves; the MCU follows up to its hard cap
                 vel_accel=ax.max_accel * spu)
             self.state[ax.name].homed = False
+        if c.motion.enable_on_start:
+            await self.enable(True)
+        if c.tmc_uart:
+            await self.link.request("CONFIG_TMC_UART", rx_pin=c.tmc_uart.rx_pin.gpio,
+                                    tx_pin=c.tmc_uart.tx_pin.gpio, baud=c.tmc_uart.baud)
+            for ax in self.axes:
+                await self._configure_tmc(ax)
         self.ready = True
         self.last_error = ""
         log.info("MCU configured: %d axes (%s)", len(self.axes),
                  ", ".join(a.name for a in self.axes))
-        if c.motion.enable_on_start:
-            await self.enable(True)
 
     async def _configure_tmc(self, ax: AxisConfig) -> None:
         if ax.tmc is None:

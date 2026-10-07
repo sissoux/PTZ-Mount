@@ -8,7 +8,7 @@ const NUM_PRESETS = 12;
 const GAMEPAD_DEADBAND = 0.12;      // ignore stick drift
 const MAX_LOG = 1500;
 let ws = null, config = null, presets = {}, status = null, recordings = [];
-let logEntries = [];
+let logEntries = [], myId = null, clients = [];
 
 const $ = (id) => document.getElementById(id);
 const input = { pad: { x: 0, y: 0 }, zoom: 0, keys: { x: 0, y: 0, z: 0 }, gp: { x: 0, y: 0, z: 0 } };
@@ -21,9 +21,10 @@ function connect() {
     const m = JSON.parse(e.data);
     switch (m.type) {
       case "status": renderStatus(m); break;
-      case "config": config = m; buildAxesTable(); break;
+      case "config": config = m; onConfig(); break;
       case "presets": presets = m.presets; renderPresets(); break;
       case "recordings": recordings = m.recordings; renderRecordings(); break;
+      case "clients": myId = m.you; clients = m.clients; renderClients(); break;
       case "debug": setDebugUi(m.on); break;
       case "log": addLog(m); break;
       case "log_backlog": logEntries = []; m.entries.forEach((x) => addLog(x, false)); renderLog(); break;
@@ -44,8 +45,39 @@ function showError(msg) {
   if (msg) setTimeout(() => { if ($("error").textContent === msg) $("error").textContent = ""; }, 5000);
 }
 function setConn(ok) { $("conn").textContent = ok ? "online" : "offline"; $("conn").classList.toggle("off", !ok); }
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
-// ------------------------------------------------------------ status
+// ------------------------------------------------------------ units helpers
+const axisCfg = (name) => config.axes.find((a) => a.name === name);
+function commonUnits() {
+  const u = [...new Set(config.axes.map((a) => a.units))];
+  return u.length === 1 ? u[0] : "u";
+}
+const fmtNum = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+const fmtSpeed = (v, u) => `${fmtNum(v)} ${u}/s`;
+const fmtAccel = (v, u) => `${fmtNum(v)} ${u}/s²`;
+function fmtPos(v, u) {
+  const sign = v < 0 ? "−" : "+";
+  return `${sign}${Math.abs(v).toFixed(2)}${u === "°" ? "°" : " " + u}`;
+}
+
+// ------------------------------------------------------------ config-driven UI
+function onConfig() {
+  buildAxesTable();
+  buildReadout();
+  buildAxisSliders();
+  const vmax = Math.max(...config.axes.map((a) => a.max_velocity));
+  const amax = Math.max(...config.axes.map((a) => a.max_accel));
+  $("speed").max = vmax; $("speed").step = vmax / 200;
+  $("accel").max = amax; $("accel").step = amax / 200;
+}
+
+function buildReadout() {
+  $("readout").innerHTML = config.axes.map((a) => `
+    <div class="ax" id="ro-${a.name}"><div class="name"><span>${a.name}</span><span class="tag" id="ro-tag-${a.name}"></span></div>
+    <div class="value" id="ro-val-${a.name}">-</div></div>`).join("");
+}
+
 function buildAxesTable() {
   const tb = $("axes").querySelector("tbody");
   tb.innerHTML = "";
@@ -53,7 +85,7 @@ function buildAxesTable() {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${a.name}</td><td class="num" id="pos-${a.name}">-</td>
       <td class="num" id="vel-${a.name}">-</td><td id="st-${a.name}"></td>
-      <td><input id="goto-${a.name}" type="number" step="any" min="${a.min}" max="${a.max}"></td>
+      <td><input id="goto-${a.name}" type="number" step="any" min="${a.min}" max="${a.max}" title="${a.min}..${a.max} ${a.units}"></td>
       <td><button class="small" title="Home this axis only">Home</button></td>`;
     tr.querySelector("button").onclick = () => send({ cmd: "home", axes: [a.name], id: "ha" });
     tb.appendChild(tr);
@@ -61,15 +93,38 @@ function buildAxesTable() {
   const homed = config.axes.filter((a) => a.home_with_all).map((a) => a.name);
   $("btn-home").title = `Homes: ${homed.join(", ") || "none"} (home_with_all in ptz.cfg)`;
 }
+
+function buildAxisSliders() {
+  const tb = $("axis-sliders").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const a of config.axes) {
+    for (const [kind, max, fmt] of [["speed", a.max_velocity, fmtSpeed], ["accel", a.max_accel, fmtAccel]]) {
+      const id = `ax-${kind}-${a.name}`;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${a.name} ${kind === "speed" ? "speed" : "accel."}</td>
+        <td><input id="${id}" type="range" min="0" max="${max}" step="${max / 200}"></td>
+        <td class="val" id="${id}-val"></td>`;
+      tb.appendChild(tr);
+      let t = null;
+      tr.querySelector("input").oninput = (e) => {
+        const v = Math.max(parseFloat(e.target.value), max / 200);
+        $(`${id}-val`).textContent = fmt(v, a.units);
+        clearTimeout(t);
+        t = setTimeout(() => send({ cmd: "set_motion", [`axis_${kind}`]: { [a.name]: v } }), 80);
+      };
+    }
+  }
+}
+
+// ------------------------------------------------------------ status
 function flag(text, on, cls = "on") { return `<span class="flag ${on ? cls : ""}">${text}</span>`; }
 
-function syncSlider(id, value, fmt, transform = (v) => v) {
+function syncSlider(id, value, text, transform = (v) => v) {
   const el = $(id);
-  if (document.activeElement === el || value === undefined) return;   // user is dragging it
-  el.value = transform(value);
-  $(`${id}-val`).textContent = fmt(value);
+  if (!el || value === undefined) return;
+  if (document.activeElement !== el) el.value = transform(value);
+  if (document.activeElement !== el) $(`${id}-val`).textContent = text;
 }
-const pct = (v) => `${Math.round(v * 100)}%`;
 const times = (v) => `${v.toFixed(2)}×`;
 
 function renderStatus(s) {
@@ -82,19 +137,108 @@ function renderStatus(s) {
   if (s.error) showError(s.error);
   for (const [name, a] of Object.entries(s.axes)) {
     const p = $(`pos-${name}`); if (!p) continue;
-    p.textContent = a.pos.toFixed(2);
-    $(`vel-${name}`).textContent = a.vel.toFixed(1);
+    p.textContent = fmtPos(a.pos, a.units);
+    $(`vel-${name}`).textContent = `${a.vel.toFixed(1)} ${a.units}/s`;
     $(`st-${name}`).innerHTML = flag("homed", a.homed) + flag("on", a.enabled)
       + flag("endstop", a.endstop, "warn") + (a.homing ? flag("homing", true, "warn") : "")
       + (a.at_limit ? flag("limit", true, "warn") : "");
+    const ro = $(`ro-${name}`);
+    if (ro) {
+      $(`ro-val-${name}`).textContent = fmtPos(a.pos, a.units);
+      ro.classList.toggle("unhomed", !a.homed);
+      ro.classList.toggle("moving", a.moving);
+      $(`ro-tag-${name}`).textContent = a.homing ? "homing" : !a.homed ? "not homed"
+        : a.at_limit ? "limit" : a.endstop ? "endstop" : "";
+    }
   }
-  syncSlider("speed", s.speed, pct);
-  syncSlider("accel", s.accel, pct);
-  syncSlider("smoothing", s.smoothing, pct);
-  syncSlider("play-speed", s.play_speed, times, Math.log2);
-  if (document.activeElement !== $("play-loop")) $("play-loop").checked = !!s.play_loop;
+  if (config && s.settings) renderSettings(s.settings);
+  renderLock(s.lock);
+  renderClients();
   renderRecorder(s.recording || {}, s.playback);
 }
+
+function renderSettings(st) {
+  const u = commonUnits();
+  $("advanced").checked = st.advanced;
+  $("simple-sliders").classList.toggle("hidden", st.advanced);
+  $("axis-sliders").classList.toggle("hidden", !st.advanced);
+  syncSlider("speed", st.speed_all, fmtSpeed(st.speed_all, u));
+  syncSlider("accel", st.accel_all, fmtAccel(st.accel_all, u));
+  for (const a of config.axes) {
+    syncSlider(`ax-speed-${a.name}`, st.speed[a.name], fmtSpeed(st.speed[a.name], a.units));
+    syncSlider(`ax-accel-${a.name}`, st.accel[a.name], fmtAccel(st.accel[a.name], a.units));
+  }
+  // in simple mode, show where an axis is capped by its own maximum
+  const capped = config.axes.filter((a) => st.effective_speed[a.name] < st.speed_all - 1e-6)
+    .map((a) => `${a.name} ${fmtSpeed(st.effective_speed[a.name], a.units)}`);
+  $("speed").title = capped.length ? `Capped: ${capped.join(", ")}` : "";
+  syncSlider("smoothing", st.smoothing, st.smoothing > 0 ? `${st.ease_s.toFixed(2)} s` : "off");
+  syncSlider("play-speed", st.play_speed, times(st.play_speed), Math.log2);
+  if (document.activeElement !== $("play-loop")) $("play-loop").checked = !!st.play_loop;
+}
+
+// ------------------------------------------------------------ motion settings
+function setupSimpleSlider(id, key, fmt) {
+  let t = null;
+  $(id).oninput = () => {
+    const el = $(id), v = Math.max(parseFloat(el.value), parseFloat(el.max) / 200);
+    $(`${id}-val`).textContent = fmt(v, commonUnits());
+    clearTimeout(t);
+    t = setTimeout(() => send({ cmd: "set_motion", [key]: v }), 80);
+  };
+}
+setupSimpleSlider("speed", "speed", fmtSpeed);
+setupSimpleSlider("accel", "accel", fmtAccel);
+let smoothTimer = null;
+$("smoothing").oninput = () => {
+  const v = parseFloat($("smoothing").value);
+  $("smoothing-val").textContent = v > 0 && config ? `${(v * config.ease_time).toFixed(2)} s` : "off";
+  clearTimeout(smoothTimer);
+  smoothTimer = setTimeout(() => send({ cmd: "set_motion", smoothing: v }), 80);
+};
+$("advanced").onchange = () => send({ cmd: "set_motion", advanced: $("advanced").checked, id: "adv" });
+
+// ------------------------------------------------------------ clients + blocking mode
+function lockedOut() { return !!(status && status.lock && status.lock.owner !== myId); }
+
+function renderLock(lock) {
+  const btn = $("btn-lock"), banner = $("lock-banner");
+  const mine = !!lock && lock.owner === myId, other = !!lock && !mine;
+  btn.textContent = mine ? "🔓 Release control" : other ? "🔒 Locked" : "🔒 Take control";
+  btn.classList.toggle("owner", mine);
+  btn.classList.toggle("other", other);
+  btn.title = other ? `Locked by ${lock.label}` : mine
+    ? "You have exclusive control. Click to release it."
+    : "Blocking mode: only you can move the head";
+  document.body.classList.toggle("locked-out", other);
+  banner.classList.toggle("hidden", !lock);
+  banner.classList.toggle("owner", mine);
+  banner.textContent = mine
+    ? "Blocking mode: you have exclusive control of the head. Nobody else can move it."
+    : other ? `Control locked by ${lock.label}. Only Stop and E-STOP are available.` : "";
+}
+$("btn-lock").onclick = () => {
+  if (!status) return;
+  if (!status.lock) send({ cmd: "lock", id: "lk" });
+  else if (status.lock.owner === myId) send({ cmd: "unlock", id: "ul" });
+  else showError(`Control locked by ${status.lock.label}`);
+};
+
+function renderClients() {
+  $("client-count").textContent = clients.length;
+  const sources = (status && status.sources) || [];
+  const rows = clients.map((c) => `<div class="${c.id === myId ? "me" : ""}">${c.owner ? "🔒 " : ""}`
+    + `${escapeHtml(c.ip)} - ${escapeHtml(c.agent)}${c.id === myId ? " (this page)" : ""}</div>`).join("");
+  const other = sources.map((s) => `<div>${s.kind.toUpperCase()} ${escapeHtml(s.ip)} - ${s.age.toFixed(0)} s ago</div>`).join("");
+  $("clients-pop").innerHTML = `<h3>Web pages (${clients.length})</h3>${rows || "<div>none</div>"}`
+    + (other ? `<h3>Network controllers (last 10 s)</h3>${other}` : "");
+  $("btn-clients").title = `${clients.length} web page(s) connected`
+    + (sources.length ? `, ${sources.length} network controller(s) active` : "");
+}
+$("btn-clients").onclick = (e) => { e.stopPropagation(); $("clients-pop").classList.toggle("hidden"); };
+document.addEventListener("click", (e) => {
+  if (!$("clients-pop").contains(e.target)) $("clients-pop").classList.add("hidden");
+});
 
 // ------------------------------------------------------------ presets
 function renderPresets() {
@@ -105,7 +249,7 @@ function renderPresets() {
     const p = presets[String(i)];
     const b = document.createElement("button");
     b.textContent = p ? p.name : `${i}`;
-    b.title = p ? JSON.stringify(p.positions) : "empty";
+    b.title = p ? Object.entries(p.positions).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ") : "empty";
     if (!p) b.classList.add("empty");
     if (saving) b.classList.add("saving");
     b.onclick = () => {
@@ -127,14 +271,20 @@ function renderRecorder(rec, play) {
   const recording = !!rec.active;
   $("btn-rec").textContent = recording ? "■ Stop recording" : "● Record";
   $("btn-rec").classList.toggle("recording", recording);
-  $("btn-keypoint").disabled = !(recording && rec.mode === "keypoints");
+  $("btn-keypoint").disabled = !(recording && rec.mode === "keypoints" && !rec.armed);
   $("btn-rec-cancel").classList.toggle("hidden", !recording);
   $("rec-mode").disabled = recording;
+  $("rec-on-move").disabled = recording;
   $("rec-badge").classList.toggle("hidden", !recording);
-  $("rec-status").textContent = recording
-    ? `Recording (${rec.mode}) - ${rec.elapsed.toFixed(1)} s, ${rec.points} ${rec.mode === "keypoints" ? "keypoints" : "samples"}`
-      + (rec.mode === "keypoints" ? " - move, then press + Keypoint" : " - move the head, then press Stop")
-    : "";
+  $("rec-badge").textContent = rec.armed ? "● ARMED" : "● REC";
+  let text = "";
+  if (recording && rec.armed) {
+    text = "Armed: recording starts as soon as the head moves.";
+  } else if (recording) {
+    text = `Recording (${rec.mode}) - ${rec.elapsed.toFixed(1)} s, ${rec.points} ${rec.mode === "keypoints" ? "keypoints" : "samples"}`
+      + (rec.mode === "keypoints" ? " - move, then press + Keypoint" : " - move the head, then press Stop");
+  }
+  $("rec-status").textContent = text;
 
   $("play-badge").classList.toggle("hidden", !play);
   $("btn-play-stop").disabled = !play;
@@ -163,6 +313,7 @@ function renderRecordings() {
       <td class="num">${r.duration.toFixed(1)} s</td>
       <td class="actions">
         <button class="small" data-a="play" title="Replay">▶</button>
+        <a class="small btn" href="/api/recordings/${encodeURIComponent(r.name)}" download title="Download (JSON)">⬇</a>
         <button class="small" data-a="rename" title="Rename">✎</button>
         <button class="small" data-a="delete" title="Delete">🗑</button></td>`;
     tr.querySelector('[data-a="play"]').onclick = () =>
@@ -177,12 +328,12 @@ function renderRecordings() {
     tb.appendChild(tr);
   }
 }
-function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 const playSpeed = () => Math.pow(2, parseFloat($("play-speed").value));
 
 $("btn-rec").onclick = () => {
   if (status && status.recording && status.recording.active) send({ cmd: "record_stop", id: "rs" });
-  else send({ cmd: "record_start", mode: $("rec-mode").value, name: $("rec-name").value.trim(), id: "rb" });
+  else send({ cmd: "record_start", mode: $("rec-mode").value, name: $("rec-name").value.trim(),
+              on_move: $("rec-on-move").checked, id: "rb" });
 };
 $("btn-keypoint").onclick = () => send({ cmd: "record_keypoint", id: "kp" });
 $("btn-rec-cancel").onclick = () => send({ cmd: "record_cancel", id: "rc" });
@@ -195,19 +346,25 @@ $("play-speed").oninput = () => {
   playSpeedTimer = setTimeout(() => send({ cmd: "play_set", speed: playSpeed() }), 80);
 };
 
-// ------------------------------------------------------------ motion sliders
-function motionSlider(id, key) {
-  let t = null;
-  $(id).oninput = () => {
-    const v = parseFloat($(id).value);
-    $(`${id}-val`).textContent = pct(v);
-    clearTimeout(t);
-    t = setTimeout(() => send({ cmd: "set_motion", [key]: v }), 80);
-  };
-}
-motionSlider("speed", "speed");
-motionSlider("accel", "accel");
-motionSlider("smoothing", "smoothing");
+// upload a path (same JSON format as the download)
+$("btn-upload").onclick = () => $("upload-file").click();
+$("upload-file").onchange = async () => {
+  const file = $("upload-file").files[0];
+  $("upload-file").value = "";
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { showError(`${file.name}: not a JSON file`); return; }
+  const name = (data && data.name) || file.name.replace(/\.json$/i, "");
+  try {
+    const r = await fetch(`/api/recordings?name=${encodeURIComponent(name)}`, {
+      method: "POST", body: JSON.stringify(data),
+      headers: { "Content-Type": "application/json", "X-PTZ-Client": myId || "" },
+    });
+    const res = await r.json();
+    if (!res.ok) showError(`Upload refused: ${res.error}`);
+    else $("rec-status").textContent = `Uploaded "${res.recording.name}" (${res.recording.points} points, ${res.recording.duration.toFixed(1)} s)`;
+  } catch (e) { showError(`Upload failed: ${e}`); }
+};
 
 // ------------------------------------------------------------ pad (pan/tilt)
 const pad = $("pad"), knob = $("knob");
@@ -261,6 +418,7 @@ function pollGamepad() {
 let wasActive = false;
 setInterval(() => {
   pollGamepad();
+  if (lockedOut()) { wasActive = false; return; }     // someone else has control
   const pick = (...v) => v.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a), 0);
   const pan = pick(input.pad.x, input.keys.x, input.gp.x);
   const tilt = pick(input.pad.y, input.keys.y, input.gp.y);

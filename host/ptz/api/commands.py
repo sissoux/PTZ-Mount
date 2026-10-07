@@ -10,20 +10,26 @@ Motion
     {"cmd": "stop"}            {"cmd": "estop"}      {"cmd": "clear_estop"}
     {"cmd": "home", "axes": ["pan", "tilt"]}  (omitted: axes with home_with_all)
     {"cmd": "enable", "on": true}
-Settings (fractions 0..1, stored on the Pi)
-    {"cmd": "set_motion", "speed": 0.8, "accel": 0.5, "smoothing": 0.3}
-    {"cmd": "set_speed", "value": 0.5}                       (legacy)
+Settings (axis units, stored on the Pi)
+    {"cmd": "set_motion", "speed": 30, "accel": 50, "smoothing": 0.3}   all axes
+    {"cmd": "set_motion", "advanced": true,
+     "axis_speed": {"pan": 40, "zoom": 3}, "axis_accel": {"tilt": 20}}  per axis
 Presets
     {"cmd": "preset_save", "preset": 1, "name": "Stage"}
     {"cmd": "preset_recall", "preset": 1, "speed": 0.8}
     {"cmd": "preset_delete", "preset": 1}      {"cmd": "presets"}
 Recording / replay
-    {"cmd": "record_start", "mode": "continuous" | "keypoints", "name": "opt"}
+    {"cmd": "record_start", "mode": "continuous" | "keypoints", "name": "opt",
+     "on_move": true}         start the clock on the first movement, trim idle end
     {"cmd": "record_keypoint"}   {"cmd": "record_stop"}   {"cmd": "record_cancel"}
     {"cmd": "recordings"}        {"cmd": "recording_delete", "name": "..."}
     {"cmd": "recording_rename", "name": "...", "new": "..."}
     {"cmd": "play", "name": "...", "speed": 1.0, "loop": false}
     {"cmd": "play_set", "speed": 2.0, "loop": true}   {"cmd": "play_stop"}
+Blocking mode (web clients only)
+    {"cmd": "lock"}   {"cmd": "unlock"}   {"cmd": "unlock", "force": true} (from the Pi)
+    While locked, only the owner may send control commands; "stop", "estop"
+    and read-only commands stay open to everyone.
 Info / debug
     {"cmd": "status"}   {"cmd": "config"}   {"cmd": "diag"}
     {"cmd": "debug", "on": true}      verbose logging (web debug console)
@@ -33,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .. import weblog
 from ..mcu import McuError
@@ -44,6 +50,9 @@ log = logging.getLogger("ptz.api")
 
 _RESERVED = {"cmd", "id", "speed", "wait", "axes", "on"}
 _QUIET = {"jog", "status", "config", "presets", "recordings", "diag"}
+# allowed to everyone, even when another client holds the lock
+_OPEN = {"stop", "estop", "status", "config", "presets", "recordings", "diag",
+         "debug", "lock", "unlock"}
 _last_jog_log = [0.0]
 
 
@@ -66,11 +75,16 @@ def _describe(msg: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in msg.items() if k not in ("cmd", "id"))
 
 
-async def dispatch(ctrl: MotionController, msg: Any, source: str = "") -> dict:
+async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
+                   client: Optional[str] = None, local: bool = False) -> dict:
+    """source: label for the logs. client: web client id (blocking mode).
+    local: request comes from the Pi itself (may force-unlock)."""
     if not isinstance(msg, dict) or "cmd" not in msg:
         return {"ok": False, "error": "expected a JSON object with a 'cmd' key"}
     cmd = msg["cmd"]
     tag = f"[{source}] " if source else ""
+    if cmd not in _OPEN and not ctrl.may_control(client):
+        return _fail(cmd, f"control is locked by {ctrl.lock_label}", quiet=cmd == "jog")
     if cmd not in _QUIET:
         log.info("%s%s %s", tag, cmd, _describe(msg))
     elif cmd == "jog" and weblog.is_debug():
@@ -102,9 +116,15 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "") -> dict:
         # ------------------------------------------------ settings
         elif cmd == "set_motion":
             ctrl.set_motion(speed=msg.get("speed"), accel=msg.get("accel"),
-                            smoothing=msg.get("smoothing"))
-        elif cmd == "set_speed":
-            ctrl.set_motion(speed=msg["value"])
+                            smoothing=msg.get("smoothing"), advanced=msg.get("advanced"),
+                            axis_speed=msg.get("axis_speed"), axis_accel=msg.get("axis_accel"))
+        # ------------------------------------------------ blocking mode
+        elif cmd == "lock":
+            if client is None:
+                raise MotionError("only web clients can take the lock")
+            ctrl.lock(client, source or client)
+        elif cmd == "unlock":
+            ctrl.unlock(client, force=bool(msg.get("force")) and local)
         # ------------------------------------------------ presets
         elif cmd == "preset_save":
             ctrl.save_preset(msg["preset"], msg.get("name", ""))
@@ -118,7 +138,8 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "") -> dict:
             reply["presets"] = ctrl.presets.all()
         # ------------------------------------------------ recording / replay
         elif cmd == "record_start":
-            ctrl.record_start(msg.get("mode", "continuous"), msg.get("name", ""))
+            ctrl.record_start(msg.get("mode", "continuous"), msg.get("name", ""),
+                              bool(msg.get("on_move", False)))
         elif cmd == "record_keypoint":
             reply["keypoints"] = ctrl.record_keypoint()
         elif cmd == "record_stop":
@@ -157,17 +178,21 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "") -> dict:
     return reply
 
 
-def _fail(cmd: str, error: str) -> dict:
-    log.warning("%s rejected: %s", cmd, error)
+def _fail(cmd: str, error: str, quiet: bool = False) -> dict:
+    if quiet:
+        log.debug("%s rejected: %s", cmd, error)
+    else:
+        log.warning("%s rejected: %s", cmd, error)
     return {"ok": False, "error": error}
 
 
 def config_summary(ctrl: MotionController) -> dict:
     return {
         "axes": [{
-            "name": a.name, "index": a.index,
+            "name": a.name, "index": a.index, "units": a.units,
             "min": a.position_min, "max": a.position_max,
-            "max_velocity": a.max_velocity, "jog_velocity": a.jog_velocity,
+            "max_velocity": a.max_velocity, "max_accel": a.max_accel,
+            "jog_velocity": a.jog_velocity,
             "has_endstop": a.has_endstop, "steps_per_unit": a.steps_per_unit,
             "home_with_all": a.home_with_all,
         } for a in ctrl.axes],

@@ -49,8 +49,10 @@ class UdpServer(asyncio.DatagramProtocol):
             msg = json.loads(data)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return
+        self.ctrl.note_source("udp", addr[0])
         if isinstance(msg, dict) and msg.get("cmd") == "jog":
-            self.ctrl.jog({k: v for k, v in msg.items() if k in self.ctrl.state})
+            if self.ctrl.may_control(None):          # blocking mode: web owner only
+                self.ctrl.jog({k: v for k, v in msg.items() if k in self.ctrl.state})
             return                                   # hot path: no task, no reply
         if isinstance(msg, dict) and msg.get("cmd") == "subscribe":
             self.subscribers[addr] = time.monotonic() + SUBSCRIPTION_TTL

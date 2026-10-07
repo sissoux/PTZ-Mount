@@ -48,6 +48,10 @@ def parse_pin(text: Optional[str]) -> Pin:
     return Pin(num, invert="!" in mods, pullup="^" in mods)
 
 
+def _units(text: str) -> str:
+    return {"deg": "°", "degree": "°", "degrees": "°"}.get(text.strip().lower(), text.strip())
+
+
 def parse_ratio(text: Optional[str]) -> float:
     """Klipper gear_ratio syntax: '80:16, 3:1' -> 15.0"""
     if not text:
@@ -133,7 +137,6 @@ class MotionConfig:
     jog_timeout: float
     enable_on_start: bool
     home_on_start: List[str]
-    accel: float = 1.0          # default acceleration factor (web UI slider)
     smoothing: float = 0.3      # default ease in/out amount 0..1
     ease_time: float = 0.6      # s of acceleration ramp at smoothing = 1
     stream_rate: float = 100.0  # Hz, host -> MCU velocity stream
@@ -181,6 +184,7 @@ class AxisConfig:
     jog_velocity: float
     jog_accel: float
     home_with_all: bool = True       # included in "Home all" / default homing
+    units: str = "°"                 # display label of the axis unit
     endstop_guard: bool = True       # MCU halts the axis on its endstop outside homing
     tmc: Optional[TmcConfig] = None
 
@@ -247,7 +251,6 @@ def load(path: str) -> PtzConfig:
                           jog_timeout=s.getfloat("jog_timeout", 0.5, 0.05, 10),
                           enable_on_start=s.getbool("enable_on_start", True),
                           home_on_start=home,
-                          accel=s.getfloat("accel", 1.0, 0.02, 1.0),
                           smoothing=s.getfloat("smoothing", 0.3, 0.0, 1.0),
                           ease_time=s.getfloat("ease_time", 0.6, 0.05, 3.0),
                           stream_rate=s.getfloat("stream_rate", 100.0, 20.0, 250.0))
@@ -301,6 +304,7 @@ def load(path: str) -> PtzConfig:
             jog_velocity=s.getfloat("jog_velocity", max_vel, 0, max_vel),
             jog_accel=s.getfloat("jog_accel", max_acc, 0, max_acc),
             home_with_all=s.getbool("home_with_all", True),
+            units=_units(s.get("units", "°")),
         )
         # Endstop guard: only meaningful when the switch sits at the end of
         # travel. If position_endstop is inside [min, max] (switch in the middle

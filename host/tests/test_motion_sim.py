@@ -114,7 +114,7 @@ def test_jog_stops_when_source_goes_silent(tmp_path):
         ctrl.jog({"zoom": 0.5})
         await asyncio.sleep(0.15)
         assert ctrl.state["zoom"].vel > 0
-        await asyncio.sleep(0.8)                    # > jog_timeout, no refresh
+        await asyncio.sleep(1.2)                    # > jog_timeout + ease out
         assert ctrl.state["zoom"].vel == 0
     run(t, tmp_path)
 
@@ -244,12 +244,100 @@ def test_zero_jog_does_not_cancel_preset_move(tmp_path):
     run(t, tmp_path)
 
 
-def test_motion_settings_persist(tmp_path):
+def test_motion_settings_in_units_and_advanced_mode(tmp_path):
     async def t(ctrl):
-        r = await dispatch(ctrl, {"cmd": "set_motion", "accel": 0.25, "smoothing": 0.8})
-        assert r["ok"] and ctrl.accel == 0.25 and ctrl.smoothing == 0.8
+        # simple mode: one value for all axes, capped per axis
+        r = await dispatch(ctrl, {"cmd": "set_motion", "speed": 150, "accel": 900,
+                                  "smoothing": 0.8})
+        assert r["ok"]
+        assert ctrl.speed_of("pan") == 150 and ctrl.accel_of("tilt") == 900
+        # advanced mode starts from what was in effect, then per axis
+        r = await dispatch(ctrl, {"cmd": "set_motion", "advanced": True,
+                                  "axis_speed": {"zoom": 20}, "axis_accel": {"pan": 99999}})
+        assert r["ok"] and ctrl.advanced
+        assert ctrl.speed_of("zoom") == 20 and ctrl.speed_of("pan") == 150
+        assert ctrl.accel_of("pan") == ctrl.axis("pan").max_accel         # capped
+        st = ctrl.status()["settings"]
+        assert st["effective_speed"]["zoom"] == 20 and st["advanced"] is True
         data = json.loads((tmp_path / "settings.json").read_text())
-        assert data["accel"] == 0.25 and data["smoothing"] == 0.8
+        assert data["advanced"] and data["speed_axis"]["zoom"] == 20
+        await dispatch(ctrl, {"cmd": "set_motion", "advanced": False})
+        assert ctrl.speed_of("zoom") == 150
+    run(t, tmp_path)
+
+
+def test_blocking_mode(tmp_path):
+    async def t(ctrl):
+        await ctrl.home(["pan"])
+        assert (await dispatch(ctrl, {"cmd": "lock"}, source="A", client="a"))["ok"]
+        assert ctrl.status()["lock"]["owner"] == "a"
+        # someone else: control rejected, stop / estop / status still allowed
+        r = await dispatch(ctrl, {"cmd": "goto", "pan": 10}, client="b")
+        assert not r["ok"] and "locked" in r["error"]
+        assert not (await dispatch(ctrl, {"cmd": "goto", "pan": 10}))["ok"]   # UDP / REST
+        assert not (await dispatch(ctrl, {"cmd": "lock"}, client="b"))["ok"]
+        assert not (await dispatch(ctrl, {"cmd": "unlock"}, client="b"))["ok"]
+        assert (await dispatch(ctrl, {"cmd": "stop"}, client="b"))["ok"]
+        assert (await dispatch(ctrl, {"cmd": "status"}, client="b"))["ok"]
+        ctrl.jog({"pan": 1.0}) if ctrl.may_control(None) else None
+        assert ctrl.state["pan"].jog_active is False
+        # owner works, then releases
+        assert (await dispatch(ctrl, {"cmd": "goto", "pan": 10}, client="a"))["ok"]
+        assert (await dispatch(ctrl, {"cmd": "unlock"}, client="a"))["ok"]
+        assert (await dispatch(ctrl, {"cmd": "goto", "pan": 0}, client="b"))["ok"]
+        # forced unlock only from the Pi itself
+        await dispatch(ctrl, {"cmd": "lock"}, client="a")
+        assert not (await dispatch(ctrl, {"cmd": "unlock", "force": True}, client="b"))["ok"]             or ctrl.lock_owner == "a"
+        assert (await dispatch(ctrl, {"cmd": "unlock", "force": True}, local=True))["ok"]
+        assert ctrl.lock_owner is None
+    run(t, tmp_path)
+
+
+def test_record_starts_on_movement_and_trims_end(tmp_path):
+    async def t(ctrl):
+        await ctrl.home(["pan"])
+        await ctrl.goto({"pan": 0}, wait=True)
+        await asyncio.sleep(0.1)
+        ctrl.record_start("continuous", "armed", on_move=True)
+        assert ctrl.recorder.state()["armed"]
+        await asyncio.sleep(1.0)                        # idle: not recorded
+        assert ctrl.recorder.state()["armed"]
+        await ctrl.goto({"pan": 30}, wait=True)
+        assert not ctrl.recorder.state()["armed"]
+        await asyncio.sleep(1.5)                        # idle end: trimmed
+        rec = ctrl.recorder.load(ctrl.record_stop()["name"])
+        pts = rec["points"]
+        assert pts[0]["pos"]["pan"] == pytest.approx(0, abs=0.05)
+        assert pts[-1]["pos"]["pan"] == pytest.approx(30, abs=0.05)
+        # ends within one sample of the end of the motion
+        moving = [p for p in pts if abs(p["pos"]["pan"] - 30) > 0.05]
+        assert pts[-1]["t"] - moving[-1]["t"] <= 0.2
+        # nothing moved at all: nothing saved
+        ctrl.record_start("continuous", on_move=True)
+        await asyncio.sleep(0.2)
+        with pytest.raises(Exception, match="never moved"):
+            ctrl.record_stop()
+    run(t, tmp_path)
+
+
+def test_upload_validation(tmp_path):
+    async def t(ctrl):
+        good = {"name": "up", "mode": "keypoints",
+                "points": [{"t": 5, "pos": {"pan": 0}}, {"t": 7, "pos": {"pan": 20}}]}
+        s = ctrl.import_recording(good)
+        assert s["name"] == "up" and s["duration"] == 2.0
+        assert ctrl.import_recording(good)["name"] == "up (2)"     # never overwrites
+        bad = [
+            {"points": [{"t": 0, "pos": {"pan": 0}}]},                          # 1 point
+            {"points": [{"t": 0, "pos": {"pan": 0}}, {"t": 0, "pos": {"pan": 1}}]},  # time
+            {"points": [{"t": 0, "pos": {"foo": 0}}, {"t": 1, "pos": {"foo": 1}}]},  # axis
+            {"points": [{"t": 0, "pos": {"pan": 0}}, {"t": 1, "pos": {"pan": 999}}]},  # limit
+            {"points": [{"t": 0, "pos": {"pan": 0}}, {"t": 1, "pos": {"tilt": 1}}]},  # axes
+            {"points": "nope"}, [1, 2],
+        ]
+        for b in bad:
+            with pytest.raises(Exception):
+                ctrl.import_recording(b)
     run(t, tmp_path)
 
 

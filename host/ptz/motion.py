@@ -57,7 +57,8 @@ class AxisState:
 
 KP = 2.0                      # position feedback gain while streaming (1/s)
 FEEDBACK_LATENCY = 0.004      # s, host receive time vs MCU position sample
-SETTINGS = ("speed", "accel", "smoothing", "play_speed")
+LOCAL_ADDRESSES = ("127.0.0.1", "::1", "localhost")
+SOURCE_TTL = 10.0             # s, how long a UDP/VISCA sender is listed as active
 
 
 class MotionController:
@@ -68,9 +69,18 @@ class MotionController:
         self.state: Dict[str, AxisState] = {a.name: AxisState() for a in self.axes}
         self.presets = PresetStore(os.path.join(cfg.server.state_dir, "presets.json"))
         m = cfg.motion
-        self.speed = 1.0                      # global speed factor 0..1
-        self.accel = m.accel                  # acceleration factor 0..1
+        # Speed / acceleration in axis units. Simple mode: one value for every
+        # axis (capped by each axis maximum). Advanced mode: one per axis.
+        self.advanced = False
+        self.speed_all = max(a.jog_velocity for a in self.axes) if self.axes else 1.0
+        self.accel_all = max(a.jog_accel for a in self.axes) if self.axes else 1.0
+        self.speed_axis = {a.name: a.jog_velocity for a in self.axes}
+        self.accel_axis = {a.name: a.jog_accel for a in self.axes}
         self.smoothing = m.smoothing          # ease in/out 0..1
+        # Blocking mode: only the lock owner (a web client id) may move the head
+        self.lock_owner: Optional[str] = None
+        self.lock_label = ""
+        self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
         self.play_speed = 1.0                 # replay speed factor
         self.play_loop = False
         self._settings_path = os.path.join(cfg.server.state_dir, "settings.json")
@@ -292,29 +302,116 @@ class MotionController:
                 data = json.load(f)
         except (OSError, ValueError):
             return
-        for k in SETTINGS:
-            if isinstance(data.get(k), (int, float)):
+        num = (int, float)
+        self.advanced = bool(data.get("advanced", False))
+        # settings.json of v0.2 stored 0..1 factors: ignore those
+        if isinstance(data.get("speed_all"), num):
+            self.speed_all = float(data["speed_all"])
+        if isinstance(data.get("accel_all"), num):
+            self.accel_all = float(data["accel_all"])
+        for key, dst in (("speed_axis", self.speed_axis), ("accel_axis", self.accel_axis)):
+            for n, v in (data.get(key) or {}).items():
+                if n in dst and isinstance(v, num):
+                    dst[n] = float(v)
+        for k in ("smoothing", "play_speed"):
+            if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
 
     def _save_settings(self) -> None:
+        data = {"advanced": self.advanced, "speed_all": self.speed_all,
+                "accel_all": self.accel_all, "speed_axis": self.speed_axis,
+                "accel_axis": self.accel_axis, "smoothing": self.smoothing,
+                "play_speed": self.play_speed}
         try:
             os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
             with open(self._settings_path, "w", encoding="utf-8") as f:
-                json.dump({k: getattr(self, k) for k in SETTINGS}, f)
+                json.dump(data, f)
         except OSError as e:
             log.warning("cannot save settings: %s", e)
 
+    def speed_of(self, name: str) -> float:
+        """Speed used for jog (full deflection) and moves, units/s."""
+        ax = self.cfg.axes[name]
+        v = self.speed_axis[name] if self.advanced else self.speed_all
+        return clamp(v, 1e-3, ax.max_velocity)
+
+    def accel_of(self, name: str) -> float:
+        """Acceleration used for jog and moves, units/s^2."""
+        ax = self.cfg.axes[name]
+        a = self.accel_axis[name] if self.advanced else self.accel_all
+        return clamp(a, 1e-3, ax.max_accel)
+
     def set_motion(self, speed: Optional[float] = None, accel: Optional[float] = None,
-                   smoothing: Optional[float] = None) -> None:
-        """Global speed, acceleration (fractions of the configured maxima)
-        and ease in/out amount (0 = sharp, 1 = softest)."""
+                   smoothing: Optional[float] = None, advanced: Optional[bool] = None,
+                   axis_speed: Optional[Dict[str, float]] = None,
+                   axis_accel: Optional[Dict[str, float]] = None) -> None:
+        """speed / accel: common value (units/s, units/s^2) of simple mode.
+        axis_speed / axis_accel: per-axis values of advanced mode.
+        smoothing: ease in/out amount (0 = sharp, 1 = softest)."""
+        if advanced is not None and bool(advanced) != self.advanced:
+            if advanced:     # start advanced mode from what was in effect
+                for n in self.speed_axis:
+                    self.speed_axis[n] = self.speed_of(n)
+                    self.accel_axis[n] = self.accel_of(n)
+            self.advanced = bool(advanced)
+        vmax = max((a.max_velocity for a in self.axes), default=1.0)
+        amax = max((a.max_accel for a in self.axes), default=1.0)
         if speed is not None:
-            self.speed = clamp(float(speed), 0.01, 1.0)
+            self.speed_all = clamp(float(speed), 1e-3, vmax)
         if accel is not None:
-            self.accel = clamp(float(accel), 0.02, 1.0)
+            self.accel_all = clamp(float(accel), 1e-3, amax)
+        for n, v in (axis_speed or {}).items():
+            ax = self.axis(n)
+            self.speed_axis[n] = clamp(float(v), 1e-3, ax.max_velocity)
+        for n, v in (axis_accel or {}).items():
+            ax = self.axis(n)
+            self.accel_axis[n] = clamp(float(v), 1e-3, ax.max_accel)
         if smoothing is not None:
             self.smoothing = clamp(float(smoothing), 0.0, 1.0)
         self._save_settings()
+
+    def settings(self) -> dict:
+        return {
+            "advanced": self.advanced,
+            "speed_all": round(self.speed_all, 3),
+            "accel_all": round(self.accel_all, 3),
+            "speed": {n: round(self.speed_axis[n], 3) for n in self.speed_axis},
+            "accel": {n: round(self.accel_axis[n], 3) for n in self.accel_axis},
+            "effective_speed": {a.name: round(self.speed_of(a.name), 3) for a in self.axes},
+            "effective_accel": {a.name: round(self.accel_of(a.name), 3) for a in self.axes},
+            "smoothing": self.smoothing,
+            "ease_s": round(self._smooth_time(), 3),
+            "play_speed": self.play_speed,
+            "play_loop": self.play_loop,
+        }
+
+    # ================================================================ blocking mode
+    def lock(self, client: str, label: str) -> None:
+        if self.lock_owner not in (None, client):
+            raise MotionError(f"control already locked by {self.lock_label}")
+        self.lock_owner, self.lock_label = client, label
+        log.info("control locked by %s", label)
+
+    def unlock(self, client: Optional[str], force: bool = False) -> None:
+        if self.lock_owner is None:
+            return
+        if not force and client != self.lock_owner:
+            raise MotionError(f"only {self.lock_label} can release the lock")
+        log.info("control lock released%s", " (forced)" if force else "")
+        self.lock_owner, self.lock_label = None, ""
+
+    def may_control(self, client: Optional[str]) -> bool:
+        return self.lock_owner is None or client == self.lock_owner
+
+    def note_source(self, kind: str, ip: str) -> None:
+        self.sources[(kind, ip)] = time.monotonic()
+
+    def active_sources(self) -> List[dict]:
+        now = time.monotonic()
+        for k in [k for k, t in self.sources.items() if now - t > SOURCE_TTL]:
+            del self.sources[k]
+        return [{"kind": k, "ip": ip, "age": round(now - t, 1)}
+                for (k, ip), t in sorted(self.sources.items())]
 
     def _smooth_time(self) -> float:
         return self.smoothing * self.cfg.motion.ease_time
@@ -420,9 +517,9 @@ class MotionController:
                 continue
             if st.jog_active and now - st.jog_time > timeout:
                 st.jog_active, st.jog_value = False, 0.0
-            amax = ax.jog_accel * self.accel
+            amax = self.accel_of(name)
             jerk = amax / smooth if smooth > 1e-3 else math.inf
-            target = st.jog_value * ax.jog_velocity * self.speed
+            target = st.jog_value * self.speed_of(name)
             st.braking = False
             if st.homed:                              # ease into the soft limits
                 pos = self.position(name)
@@ -499,7 +596,7 @@ class MotionController:
         """Absolute move in user units. All axes arrive at the same time,
         with the current acceleration and ease in/out settings."""
         self._check_ready()
-        k = max(0.01, min(1.0, speed)) * self.speed
+        k = max(0.01, min(1.0, speed))
         start, final, vmax, amax = {}, {}, {}, {}
         for name, target in targets.items():
             ax = self.axis(name)
@@ -509,8 +606,8 @@ class MotionController:
                 raise MotionError(f"axis '{name}' is homing")
             final[name] = max(ax.position_min, min(ax.position_max, float(target)))
             start[name] = self.position(name)
-            vmax[name] = ax.max_velocity * k
-            amax[name] = ax.max_accel * self.accel
+            vmax[name] = self.speed_of(name) * k
+            amax[name] = self.accel_of(name)
         if not final:
             return
         fut = self._start_traj(MoveTrajectory(start, final, vmax, amax, self._smooth_time()),
@@ -692,9 +789,18 @@ class MotionController:
                         speed=speed, wait=wait)
 
     # ================================================================ recording / replay
-    def record_start(self, mode: str = "continuous", name: str = "") -> None:
-        self.recorder.start(mode, name)
-        log.info("recording started (%s)", mode)
+    def record_start(self, mode: str = "continuous", name: str = "",
+                     on_move: bool = False) -> None:
+        self.recorder.start(mode, name, on_move)
+        log.info("recording %s (%s)", "armed: starts on first movement" if on_move
+                 else "started", mode)
+
+    def import_recording(self, data, name: str = "") -> dict:
+        limits = {a.name: (a.position_min, a.position_max) for a in self.axes}
+        summary = self.recorder.import_data(data, limits, name)
+        log.info("recording '%s' uploaded: %d points, %.1f s", summary["name"],
+                 summary["points"], summary["duration"])
+        return summary
 
     def record_keypoint(self) -> int:
         n = self.recorder.keypoint()
@@ -783,6 +889,7 @@ class MotionController:
                 "at_limit": bool(f & P.ST_AT_LIMIT) or st.braking,
                 "min": ax.position_min,
                 "max": ax.position_max,
+                "units": ax.units,
             }
         playback = None
         if self.playback is not None:
@@ -793,11 +900,10 @@ class MotionController:
             "connected": self.connected,
             "ready": self.ready,
             "estop": self.estopped,
-            "speed": self.speed,
-            "accel": self.accel,
-            "smoothing": self.smoothing,
-            "play_speed": self.play_speed,
-            "play_loop": self.play_loop,
+            "settings": self.settings(),
+            "lock": ({"owner": self.lock_owner, "label": self.lock_label}
+                     if self.lock_owner else None),
+            "sources": self.active_sources(),
             "motion": self._traj_kind,
             "playback": playback,
             "recording": self.recorder.state(),

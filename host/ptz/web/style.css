@@ -73,3 +73,45 @@ td input { width: 80px; background: #15171a; color: var(--text); border: 1px sol
 .console .l-ERROR, .console .l-CRITICAL { color: var(--danger); }
 .console .ts { color: #5c6470; }
 .console .src { color: #6b8fd6; }
+
+/* ---- v0.3: position readout, clients, lock, per-axis sliders ---- */
+.readout { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; }
+.readout .ax { flex: 1; min-width: 92px; background: #15171a; border: 1px solid var(--line);
+               border-radius: 8px; padding: 6px 10px; }
+.readout .name { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+                 display: flex; justify-content: space-between; }
+.readout .value { font: 600 26px/1.15 ui-monospace, "Cascadia Mono", Consolas, monospace;
+                  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.readout .ax.unhomed .value { color: var(--muted); }
+.readout .ax.moving { border-color: var(--accent); }
+.readout .tag { font-size: 10px; color: var(--warn); }
+.motion-settings { grid-column: 1 / -1; }
+.axis-sliders { margin-top: 10px; }
+.axis-sliders td { border: none; padding: 3px 4px; }
+.axis-sliders td:first-child { color: var(--muted); width: 1%; white-space: nowrap; }
+.axis-sliders input[type=range] { width: 100%; }
+.axis-sliders .val { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right;
+                     font-variant-numeric: tabular-nums; width: 1%; }
+label.adv { display: block; margin-top: 10px; color: var(--muted); font-size: 12px; }
+button.ghost { background: transparent; }
+.clients { position: relative; }
+.popover { position: absolute; right: 0; top: 34px; z-index: 5; min-width: 260px; background: var(--card);
+           border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 24px #0009;
+           font-size: 12px; }
+.popover div { padding: 3px 0; }
+.popover .me { color: var(--accent); }
+.popover h3 { font-size: 11px; color: var(--muted); margin: 6px 0 2px; text-transform: uppercase; }
+button.lock.owner { background: var(--ok); border-color: var(--ok); }
+button.lock.other { background: var(--danger); border-color: var(--danger); }
+.lock-banner { background: var(--danger); color: #fff; padding: 6px 16px; font-size: 13px; }
+.lock-banner.owner { background: #1d5f3c; }
+body.locked-out .control .pad, body.locked-out .control .zoom,
+body.locked-out .motion-settings, body.locked-out #presets,
+body.locked-out .recorder, body.locked-out #btn-home, body.locked-out #btn-goto,
+body.locked-out #btn-enable, body.locked-out #btn-disable, body.locked-out #axes button {
+  opacity: .35; pointer-events: none; }
+
+a.btn { display: inline-block; text-decoration: none; color: var(--text); background: #2b3038;
+        border: 1px solid var(--line); border-radius: 6px; }
+a.btn.small { padding: 3px 8px; font-size: 12px; }
+a.btn:hover { border-color: var(--accent); }

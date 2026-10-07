@@ -86,7 +86,7 @@ class ViscaServer(asyncio.DatagramProtocol):
         period = max(0.05, self.ctrl.cfg.motion.jog_timeout / 3)
         while True:
             await asyncio.sleep(period)
-            if any(self.drive.values()):
+            if any(self.drive.values()) and self.ctrl.may_control(None):
                 self.ctrl.jog(self.drive)
 
     def _set_drive(self, **values: float) -> None:
@@ -95,6 +95,7 @@ class ViscaServer(asyncio.DatagramProtocol):
 
     # ------------------------------------------------------------ rx
     def datagram_received(self, data: bytes, addr) -> None:
+        self.ctrl.note_source("visca", addr[0])
         if len(data) >= 8 and data[0] in (0x01, 0x02):
             ptype, length, seq = struct.unpack(">HHI", data[:8])
             payload = data[8:8 + length]
@@ -132,6 +133,9 @@ class ViscaServer(asyncio.DatagramProtocol):
                 return [ERR_SYNTAX]
             if p[1] != 0x01:
                 return [ERR_SYNTAX]
+            if not c.may_control(None):              # blocking mode: web owner only
+                self.drive = {}
+                return [ERR_NOT_EXEC]
             cat, cmd = p[2], p[3]
             # ---- pan / tilt
             if cat == 0x06 and cmd == 0x01 and len(p) == 9:

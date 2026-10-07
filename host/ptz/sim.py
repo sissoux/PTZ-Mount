@@ -278,6 +278,8 @@ class SimTransport:
 
         dv = acc * dt
         a.v += max(-dv, min(dv, vt - a.v))
+        if abs(a.v) < 1e-6:           # firmware: integer step rate, no float residue
+            a.v = 0.0
         if a.at_limit and ((a.v > 0 and a.pos >= a.lim_max) or (a.v < 0 and a.pos <= a.lim_min)):
             a.v = 0.0
 

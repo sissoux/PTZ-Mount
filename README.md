@@ -74,19 +74,32 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
 
 ## Web UI features
 
-* **Live control**: pad, zoom rocker, keyboard, gamepad, presets.
-* **Speed, Acceleration, Ease in/out** sliders: apply to jogging, moves,
-  presets and the move to the start of a replay. Values are stored on the Pi.
+* **Live control**: pad, zoom rocker, keyboard, gamepad, presets, and a
+  large position readout per axis (unit label set by `units:` in each axis).
+* **Speed and Acceleration in real units** (°/s, °/s²) for jogging, moves,
+  presets and the move to the start of a replay. One value for all axes,
+  capped by each axis maximum, or separate values per axis with
+  **Advanced**. **Ease in/out** is shown in seconds of ramp. Stored on the Pi.
 * **Record & replay**: press Record, move the head by any means (web,
   gamepad, UDP joystick, VISCA, presets), press Stop.
-  * *Continuous path* records the real path.
-  * *Keypoints* records only the points you add with "+ Keypoint", with
-    their timing, and replays a smooth curve through them.
-  * Replay once or in a loop, at 0.1x to 4x, adjustable while playing. The
-    head first moves to the start point. Any manual jog takes over.
+  * *Start when moving* (default): the clock starts with the first
+    movement and the motionless end is trimmed.
+  * *Continuous path* records the real path. *Keypoints* records only the
+    points you add with "+ Keypoint", with their timing, and replays a
+    smooth curve through them.
+  * Replay once or in a loop, at 0.1x to 4x, adjustable while playing.
+  * Download a recording as JSON, or upload one. Uploads are validated
+    against the axes and soft limits and never overwrite an existing name.
+* **Connected devices**: the 👥 counter lists the web pages and the network
+  controllers (UDP, VISCA) seen in the last 10 s.
+* **Blocking mode** (🔒 Take control): only your page can move the head. The
+  others, plus UDP, VISCA and REST, can only Stop and E-stop. The lock is
+  released when you click again or close the page. From the Pi, a stuck lock
+  can be forced open:
+  `curl -X POST localhost:8080/api/cmd -d '{"cmd":"unlock","force":true}'`
 * **Debug mode** (top right): verbose logging and a live console showing
-  every command, rejection, MCU event and endstop change, plus a driver
-  diagnostics button.
+  every command with its source, rejections, MCU events and endstop changes,
+  plus a driver diagnostics button.
 
 All of them share the same command set, documented in
 [host/ptz/api/commands.py](host/ptz/api/commands.py). Example:

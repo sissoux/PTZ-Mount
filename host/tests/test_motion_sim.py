@@ -474,8 +474,6 @@ def test_race_learning_and_tracking(tmp_path, monkeypatch):
         # tracking: arm, GO from the "timing system" even while a page holds the lock
         await ctrl.goto({"pan": 20}, wait=True)
         assert (await dispatch(ctrl, {"cmd": "track_arm", "name": "Circuit"}))["ok"]
-        assert not (await dispatch(ctrl, {"cmd": "track_go"}))["ok"] \
-            or ctrl.tracking["phase"] == "armed"
         for _ in range(200):
             if ctrl.tracking["phase"] == "armed":
                 break
@@ -501,4 +499,55 @@ def test_race_learning_and_tracking(tmp_path, monkeypatch):
         assert ctrl.tracking["phase"] == "idle"
         with pytest.raises(Exception):
             ctrl.track_go()
+    run(t, tmp_path)
+
+
+def test_go_during_lap_restarts_smoothly_and_auto_adjust(tmp_path, monkeypatch):
+    import ptz.track
+    monkeypatch.setattr(ptz.track, "MIN_LAP_S", 0.2)
+
+    async def t(ctrl):
+        await ctrl.home(["pan"])
+        await ctrl.goto({"pan": 0}, wait=True)
+        ctrl.record_start("laps", "Ring")
+        ctrl.lap_mark()
+        for _ in range(2):
+            await ctrl.goto({"pan": 60}, speed=0.3, wait=True)
+            await ctrl.goto({"pan": 0}, speed=0.3, wait=True)
+            ctrl.lap_mark()
+        lap_time = ctrl.record_stop()["lap_time"]
+        assert lap_time > 1.0
+        await ctrl.track_arm("Ring")
+        while ctrl.tracking["phase"] != "armed":
+            await asyncio.sleep(0.02)
+        ctrl.track_go()
+        await asyncio.sleep(lap_time * 0.4)                 # mid-lap, far from the start
+        assert ctrl.position("pan") > 20
+        # second GO mid-lap: lap restarts from the start, gliding (no jump)
+        loop = asyncio.get_running_loop()
+        prev = None
+        ctrl.track_go()
+        assert ctrl.tracking["phase"] == "running"
+        speeds = []
+        for _ in range(int(lap_time / 0.02)):
+            await asyncio.sleep(0.02)
+            p, now = ctrl._current_state(["pan"])[0]["pan"], loop.time()
+            if prev is not None and now > prev[1]:
+                speeds.append(abs(p - prev[0]) / (now - prev[1]))
+            prev = (p, now)
+        assert ctrl.tracking["runs"] >= 1
+        # the set point never moves faster than the axis can: no jump to the start
+        assert max(speeds) <= ctrl.axis("pan").max_velocity * 1.15
+        await ctrl.track_abort()
+
+        # auto adjust: halfway to the measured lap, ignore outliers
+        ctrl.tracking["lap_time"] = 18.0
+        ctrl.track_set(target_lap=0, speed=1.0, auto_adjust=True, adjust_tolerance=0.3)
+        ctrl._auto_adjust(17.0)
+        assert ctrl.current_lap_time() == pytest.approx(17.5)
+        ctrl._auto_adjust(40.0)                               # crash / artefact
+        assert ctrl.current_lap_time() == pytest.approx(17.5)
+        assert "ignored" in ctrl.tracking["adjust_note"]
+        ctrl._auto_adjust(3.0)                                # GO from another car
+        assert ctrl.current_lap_time() == pytest.approx(17.5)
     run(t, tmp_path)

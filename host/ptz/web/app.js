@@ -385,6 +385,7 @@ $("upload-file").onchange = async () => {
 };
 
 // ------------------------------------------------------------ race tracking
+const goAllowed = (phase) => ["armed", "arming", "running", "done"].includes(phase);
 const learning = () => !!(status && status.recording && status.recording.active && status.recording.mode === "laps");
 function lapMark() {
   send({ cmd: "lap_mark", id: "lap" });
@@ -446,19 +447,25 @@ function renderTracking(tr, rec) {
         + ` - current lap ${rec.lap_elapsed.toFixed(1)} s`;
   }
   const phase = tr.phase || "idle";
-  $("btn-go").disabled = phase !== "armed";
+  $("btn-go").disabled = !goAllowed(phase);
   $("btn-arm").disabled = phase === "arming" || phase === "running";
   $("btn-track-abort").disabled = phase === "idle" || phase === "done";
   $("track-progress").style.width = tr.progress != null ? `${Math.round(tr.progress * 100)}%` : "0";
   $("track-speed").textContent = tr.lap_time
-    ? `Learned lap ${tr.lap_time.toFixed(2)} s - replay ×${tr.speed_eff.toFixed(2)}` : "";
+    ? `Learned lap ${tr.lap_time.toFixed(2)} s - current lap ${tr.current_lap.toFixed(2)} s (×${tr.speed_eff.toFixed(2)})`
+      + (tr.last_interval ? ` - last GO-to-GO ${tr.last_interval.toFixed(2)} s` : "")
+      + (tr.adjust_note ? ` - ${tr.adjust_note}` : "")
+    : "";
   if (document.activeElement !== $("auto-rearm")) $("auto-rearm").checked = tr.auto_rearm !== false;
+  if (document.activeElement !== $("auto-adjust")) $("auto-adjust").checked = !!tr.auto_adjust;
+  if (document.activeElement !== $("adjust-tol") && tr.adjust_tolerance)
+    $("adjust-tol").value = Math.round(tr.adjust_tolerance * 100);
   if (document.activeElement !== $("target-lap")) $("target-lap").value = tr.target_lap || "";
   $("track-status").textContent = {
     idle: "", done: `Lap done (${tr.runs}). Press ARM for the next one.`,
     arming: `Moving to the start point of "${tr.track}"…`,
     armed: `ARMED on "${tr.track}": waiting for GO` + (tr.runs ? ` (${tr.runs} lap(s) done)` : ""),
-    running: `Tracking lap ${tr.runs + 1}…`,
+    running: `Tracking lap ${tr.runs + 1}… (GO again = next lap)`,
   }[phase] || phase;
 }
 $("btn-arm").onclick = () => {
@@ -469,6 +476,11 @@ $("btn-arm").onclick = () => {
 $("btn-go").onclick = () => send({ cmd: "track_go", id: "go" });
 $("btn-track-abort").onclick = () => send({ cmd: "track_abort", id: "ta" });
 $("auto-rearm").onchange = () => send({ cmd: "track_set", auto_rearm: $("auto-rearm").checked });
+$("auto-adjust").onchange = () => send({ cmd: "track_set", auto_adjust: $("auto-adjust").checked, id: "aa" });
+$("adjust-tol").onchange = () => {
+  const v = parseFloat($("adjust-tol").value);
+  if (!isNaN(v)) send({ cmd: "track_set", adjust_tolerance: v / 100, id: "at" });
+};
 $("target-lap").onchange = () => {
   const v = parseFloat($("target-lap").value);
   send({ cmd: "track_set", target_lap: isNaN(v) ? 0 : v, id: "tl" });
@@ -510,7 +522,7 @@ document.addEventListener("keydown", (e) => {
     if (learning()) lapMark(); else send({ cmd: "stop" });
     e.preventDefault(); return;
   }
-  if (e.key === "Enter" && status && status.tracking && status.tracking.phase === "armed") {
+  if (e.key === "Enter" && status && status.tracking && goAllowed(status.tracking.phase)) {
     send({ cmd: "track_go", id: "go" }); e.preventDefault(); return;
   }
   if (e.key === "Escape") { send({ cmd: "estop" }); e.preventDefault(); return; }

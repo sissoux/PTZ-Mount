@@ -33,7 +33,9 @@ Race tracking
     {"cmd": "track_build", "source": "Circuit (raw)", "exclude": [2]}  rebuild
     {"cmd": "track_arm", "name": "Circuit"}      go to the start point and wait
     {"cmd": "track_go"}            timing signal: start the lap now (open to all)
-    {"cmd": "track_set", "target_lap": 92.5, "speed": 1.0, "auto_rearm": true}
+    {"cmd": "track_set", "target_lap": 92.5, "speed": 1.0, "auto_rearm": true,
+     "auto_adjust": true, "adjust_tolerance": 0.3}
+    track_go during a lap drops it and starts the next one (smooth join)
     {"cmd": "track_abort"}
 Blocking mode (web clients only)
     {"cmd": "lock"}   {"cmd": "unlock"}   {"cmd": "unlock", "force": true} (from the Pi)
@@ -186,7 +188,8 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             ctrl.track_go()
         elif cmd == "track_set":
             ctrl.track_set(speed=msg.get("speed"), target_lap=msg.get("target_lap"),
-                           auto_rearm=msg.get("auto_rearm"))
+                           auto_rearm=msg.get("auto_rearm"), auto_adjust=msg.get("auto_adjust"),
+                           adjust_tolerance=msg.get("adjust_tolerance"))
         elif cmd == "track_abort":
             await ctrl.track_abort()
         # ------------------------------------------------ info / debug

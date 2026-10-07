@@ -1,6 +1,6 @@
 import pytest
 
-from ptz.trajectory import (MoveTrajectory, Pchip, PlaybackTrajectory, SCurveProfile,
+from ptz.trajectory import (BlendIn, MoveTrajectory, Pchip, PlaybackTrajectory, SCurveProfile,
                             VelocityShaper, braking_speed)
 
 
@@ -119,3 +119,21 @@ def test_velocity_shaper_settles_with_jittery_ticks():
         for _ in range(600):
             sh.step(target, amax, jerk, r.uniform(0.005, 0.03))
         assert sh.v == target, (seed, sh.v, sh.a)
+
+
+def test_blend_in_starts_at_current_state_and_joins_the_path():
+    pts = [{"t": 0.0, "pos": {"pan": 0.0}}, {"t": 2.0, "pos": {"pan": 40.0}},
+           {"t": 4.0, "pos": {"pan": 0.0}}]
+    lap = PlaybackTrajectory(pts, {"pan": 100.0}, lambda: 1.0, natural_ends=True)
+    b = BlendIn(lap, {"pan": 25.0}, {"pan": 12.0}, {"pan": 100.0}, {"pan": 200.0})
+    p0, v0 = b.sample()["pan"]
+    assert p0 == pytest.approx(25.0) and v0 == pytest.approx(12.0)
+    prev_p, prev_v = p0, v0
+    dt = 0.01
+    while b.t < b.T + 0.2:
+        b.advance(dt)
+        p, v = b.sample()["pan"]
+        assert abs(p - prev_p) < 1.0                          # continuous position
+        assert abs(v - prev_v) / dt < 400                     # bounded acceleration
+        prev_p, prev_v = p, v
+    assert b.sample()["pan"] == lap.sample()["pan"]           # joined the lap exactly

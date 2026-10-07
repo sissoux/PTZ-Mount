@@ -85,6 +85,16 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
    operator armed. A *Target lap* time (s) rescales the replay speed for
    faster or slower cars. With *Auto re-arm*, the head returns to the start
    point after each lap. A joystick move, Stop or Abort cancels.
+4. **GO during a lap** (the car was faster than the replay, or a GO came while
+   the head was still returning to the start) drops the current lap and
+   starts the next one immediately. The head glides from its current
+   position and speed onto the new lap, within half of each axis's speed and
+   acceleration limits. It does not jump back to the start point.
+5. **Auto adjust lap time**: GO-to-GO intervals are measured. If one is
+   within the tolerance (±30 % by default) of the lap time in use, the next
+   lap uses the halfway value (17 s in use, 18 s measured: 17.5 s next).
+   Intervals outside the tolerance are ignored, for example a crash, a slow
+   lap, or a GO triggered by another car.
 
 ## Control interfaces
 

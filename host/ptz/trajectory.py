@@ -298,6 +298,73 @@ class PlaybackTrajectory:
         self._last = {n: (y, dy * k if not self.done else 0.0) for n, (y, dy) in here.items()}
 
     def sample(self) -> Dict[str, Tuple[float, float]]:
-        if not self._last:
-            return {n: (sp(self.t0 + self.tau)[0], 0.0) for n, sp in self.splines.items()}
+        if not self._last:                       # not advanced yet: start state
+            return self.initial()
         return dict(self._last)
+
+    def initial(self) -> Dict[str, Tuple[float, float]]:
+        """(position, velocity) at the start, at the initial speed factor."""
+        # the spline's own start slope (calling it at the first point would
+        # return the "outside the range" slope of 0)
+        return {n: (sp.ys[0], sp.m[0] * self._k) for n, sp in self.splines.items()}
+
+
+class BlendIn:
+    """Joins a trajectory from another position and velocity.
+
+    The difference between the current state and the start of `inner` is
+    faded out with a cubic Hermite curve (same velocity at the start, zero
+    offset and zero offset-velocity at the end), while `inner` already runs:
+    the head glides onto the new path instead of jumping or stopping.
+    """
+
+    MIN_T, MAX_T = 0.3, 6.0
+
+    def __init__(self, inner, start_pos: Dict[str, float], start_vel: Dict[str, float],
+                 vmax: Dict[str, float], amax: Dict[str, float]):
+        self.inner = inner
+        self.axes = inner.axes
+        self.final = inner.final
+        s0 = inner.initial()
+        self.o0 = {n: start_pos.get(n, s0[n][0]) - s0[n][0] for n in self.axes}
+        self.v0 = {n: start_vel.get(n, s0[n][1]) - s0[n][1] for n in self.axes}
+        T = self.MIN_T
+        for n in self.axes:
+            # The fade must use at most half of the axis limits (the lap uses
+            # the rest): its speed peaks at 1.5*|o|/T, its acceleration at
+            # 6|o|/T^2 + 4|v|/T (Hermite curve, at the start).
+            o, v = abs(self.o0[n]), abs(self.v0[n])
+            vm, am = max(vmax[n], 1e-9), max(amax[n], 1e-9)
+            T = max(T, 3.0 * o / vm,
+                    (4.0 * v + math.sqrt(16.0 * v * v + 12.0 * am * o)) / am)
+        self.T = min(T, self.MAX_T)
+        self.t = 0.0
+
+    @property
+    def duration(self) -> float:
+        return self.inner.duration
+
+    @property
+    def done(self) -> bool:
+        return self.inner.done
+
+    @property
+    def progress(self) -> float:
+        return self.inner.progress
+
+    def advance(self, dt: float) -> None:
+        self.inner.advance(dt)
+        self.t += dt
+
+    def sample(self) -> Dict[str, Tuple[float, float]]:
+        s = self.inner.sample()
+        if self.t >= self.T:
+            return s
+        u, T = self.t / self.T, self.T
+        h00, h10 = 2 * u ** 3 - 3 * u ** 2 + 1, u ** 3 - 2 * u ** 2 + u
+        d00, d10 = 6 * u ** 2 - 6 * u, 3 * u ** 2 - 4 * u + 1
+        out = {}
+        for n, (p, v) in s.items():
+            o, w = self.o0[n], self.v0[n] * T
+            out[n] = (p + h00 * o + h10 * w, v + (d00 * o + d10 * w) / T)
+        return out

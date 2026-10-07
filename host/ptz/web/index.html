@@ -143,16 +143,23 @@
       </div>
       <div class="row">
         <label><input id="auto-rearm" type="checkbox" checked> Auto re-arm after each lap</label>
-        <span id="track-speed" class="muted"></span>
       </div>
       <div class="row">
+        <label title="After each GO, the next lap time moves halfway to the measured GO-to-GO time">
+          <input id="auto-adjust" type="checkbox"> Auto adjust lap time</label>
+        <label title="Measured laps further than this from the current lap time are ignored (crash, slow lap, another car)">
+          ignore beyond ± <input id="adjust-tol" type="number" min="2" max="100" step="1" value="30" class="short"> %</label>
+      </div>
+      <div id="track-speed" class="muted"></div>
+      <div class="row">
         <button id="btn-arm">ARM</button>
-        <button id="btn-go" class="go-btn" disabled>GO <small>(Enter)</small></button>
+        <button id="btn-go" class="go-btn" disabled title="Start the lap now. During a lap: drop it and start the next one">GO <small>(Enter)</small></button>
         <button id="btn-track-abort" disabled>Abort</button>
       </div>
       <div class="row"><div class="progress"><div id="track-progress"></div></div></div>
       <div id="track-status" class="muted"></div>
-      <p class="hint">ARM moves to the start point and waits. GO starts the lap: here,
+      <p class="hint">ARM moves to the start point and waits. A GO during a lap drops it and
+        glides onto the next one. GO starts the lap: here,
         with Enter, or from the timing system: UDP <code>{"cmd":"track_go"}</code> to port 9000,
         or HTTP POST /api/cmd. A joystick move or Stop aborts.</p>
     </section>

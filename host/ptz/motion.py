@@ -33,8 +33,8 @@ from .config import AxisConfig, PtzConfig
 from .mcu import McuError, McuLink
 from .presets import PresetStore
 from .recorder import Recorder
-from .trajectory import (MoveTrajectory, PlaybackTrajectory, VelocityShaper, braking_speed,
-                         clamp)
+from .trajectory import (BlendIn, MoveTrajectory, PlaybackTrajectory, VelocityShaper,
+                         braking_speed, clamp)
 
 log = logging.getLogger("ptz.motion")
 
@@ -92,7 +92,11 @@ class MotionController:
         self._play_task: Optional[asyncio.Task] = None
         # race tracking: arm on a learned lap, GO on the timing signal
         self.tracking = {"phase": "idle", "track": None, "lap_time": None, "speed": 1.0,
-                         "target_lap": None, "auto_rearm": True, "runs": 0}
+                         "target_lap": None, "auto_rearm": True, "runs": 0,
+                         # auto adjust: next lap time = halfway to the measured one
+                         "auto_adjust": False, "adjust_tolerance": 0.3,
+                         "last_interval": None, "adjust_note": ""}
+        self._last_go: Optional[float] = None
         self._track_task: Optional[asyncio.Task] = None
         self._go: Optional[asyncio.Event] = None
         self._traj = None                     # MoveTrajectory | PlaybackTrajectory
@@ -553,8 +557,10 @@ class MotionController:
                            v2=vels[2], v3=vels[3])
 
     # ================================================================ trajectories
-    def _start_traj(self, traj, kind: str) -> asyncio.Future:
-        self._cancel_traj()
+    def _start_traj(self, traj, kind: str, replace: bool = False) -> asyncio.Future:
+        """replace: the previous trajectory is superseded on purpose (its
+        future resolves to False instead of failing with 'move interrupted')."""
+        self._cancel_traj(quiet=replace)
         self._cancel_jog(traj.axes)
         self._des_hist.clear()
         fut = asyncio.get_running_loop().create_future()
@@ -589,14 +595,30 @@ class MotionController:
             if fut is not None and not fut.done():
                 fut.set_exception(MotionError(f"move did not complete: {e}"))
 
-    def _cancel_traj(self, handover: bool = False) -> None:
+    def _cancel_traj(self, handover: bool = False, quiet: bool = False) -> None:
         traj, fut = self._traj, self._traj_future
         self._traj, self._traj_kind, self._traj_future = None, "", None
         if traj is not None:
             for n in traj.axes:      # continue smoothly from the streamed speed
                 self._shapers[n].reset(self._cmd_vel[n] if handover else 0.0)
         if fut is not None and not fut.done():
-            fut.set_exception(MotionError("move interrupted"))
+            if quiet:
+                fut.set_result(False)
+            else:
+                fut.set_exception(MotionError("move interrupted"))
+
+    def _current_state(self, axes: Iterable[str]) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Where the head is going right now: the streamed set point and
+        velocity if a trajectory runs (no measurement lag), else measured."""
+        pos, vel = {}, {}
+        sample = self._traj.sample() if self._traj is not None else {}
+        for n in axes:
+            if n in sample:
+                pos[n], vel[n] = sample[n][0], self._cmd_vel[n]
+            else:
+                pos[n] = self.position(n)
+                vel[n] = self.cfg.axes[n].to_units(self.state[n].vel)
+        return pos, vel
 
     def _cancel_motion(self, handover: bool = False) -> None:
         """Stop any running move and replay (jog sources are kept)."""
@@ -616,6 +638,16 @@ class MotionController:
                    wait: bool = False) -> None:
         """Absolute move in user units. All axes arrive at the same time,
         with the current acceleration and ease in/out settings."""
+        traj = self._plan_move(targets, speed)
+        if traj is None:
+            return
+        fut = self._start_traj(traj, "move")
+        if wait:
+            await fut
+        else:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+
+    def _plan_move(self, targets: Dict[str, float], speed: float = 1.0) -> Optional[MoveTrajectory]:
         self._check_ready()
         k = max(0.01, min(1.0, speed))
         start, final, vmax, amax = {}, {}, {}, {}
@@ -630,13 +662,8 @@ class MotionController:
             vmax[name] = self.speed_of(name) * k
             amax[name] = self.accel_of(name)
         if not final:
-            return
-        fut = self._start_traj(MoveTrajectory(start, final, vmax, amax, self._smooth_time()),
-                               "move")
-        if wait:
-            await fut
-        else:
-            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+            return None
+        return MoveTrajectory(start, final, vmax, amax, self._smooth_time())
 
     async def move_relative(self, deltas: Dict[str, float], speed: float = 1.0,
                             wait: bool = False) -> None:
@@ -918,10 +945,13 @@ class MotionController:
         return tr["speed"]
 
     def track_set(self, speed: Optional[float] = None, target_lap: Optional[float] = None,
-                  auto_rearm: Optional[bool] = None) -> None:
+                  auto_rearm: Optional[bool] = None, auto_adjust: Optional[bool] = None,
+                  adjust_tolerance: Optional[float] = None) -> None:
         """speed: replay factor. target_lap: expected lap time in seconds
         (overrides speed; 0 clears it). auto_rearm: return to the start point
-        after each lap and wait for the next GO."""
+        after each lap and wait for the next GO. auto_adjust: after each GO,
+        move the lap time halfway to the measured GO-to-GO time, unless it
+        differs by more than adjust_tolerance (fraction, e.g. 0.3 = 30 %)."""
         tr = self.tracking
         if speed is not None:
             tr["speed"] = clamp(float(speed), 0.1, 4.0)
@@ -929,6 +959,15 @@ class MotionController:
             tr["target_lap"] = float(target_lap) if float(target_lap) > 0 else None
         if auto_rearm is not None:
             tr["auto_rearm"] = bool(auto_rearm)
+        if auto_adjust is not None:
+            tr["auto_adjust"] = bool(auto_adjust)
+            self._last_go = None          # measure from the next GO
+        if adjust_tolerance is not None:
+            tr["adjust_tolerance"] = clamp(float(adjust_tolerance), 0.02, 1.0)
+
+    def current_lap_time(self) -> Optional[float]:
+        tr = self.tracking
+        return tr["lap_time"] / self._track_speed() if tr["lap_time"] else None
 
     async def track_arm(self, name: str) -> None:
         """Move to the start point of a learned lap and wait for GO."""
@@ -941,31 +980,56 @@ class MotionController:
             if not self.state[n].homed:
                 raise MotionError(f"axis '{n}' is not homed")
         self._cancel_motion()
-        self.tracking.update(phase="arming", track=rec["name"], runs=0,
-                             lap_time=rec.get("lap_time") or rec.get("duration"))
+        self.tracking.update(phase="arming", track=rec["name"], runs=0, last_interval=None,
+                             adjust_note="", lap_time=rec.get("lap_time") or rec.get("duration"))
+        self._last_go = None
         self._go = asyncio.Event()
         self._track_task = asyncio.get_running_loop().create_task(self._track_run(rec, axes))
+
+    async def _race(self, fut: Optional[asyncio.Future]) -> bool:
+        """Wait for `fut` (a trajectory) or a GO. True if GO came first."""
+        go = asyncio.ensure_future(self._go.wait())
+        waits = {go} if fut is None else {go, fut}
+        done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        if go in done:
+            self._go.clear()
+            return True
+        go.cancel()
+        fut.result()                      # raises MotionError if interrupted (jog, stop)
+        return False
 
     async def _track_run(self, rec: dict, axes: List[str]) -> None:
         pts = [{"t": p["t"], "pos": {n: p["pos"][n] for n in axes}} for p in rec["points"]]
         vmax = {n: self.cfg.axes[n].max_velocity for n in axes}
         tr = self.tracking
+        go = False
         try:
             while True:
-                tr["phase"] = "arming"
-                await self.goto(pts[0]["pos"], wait=True)
-                self._go.clear()
-                tr["phase"] = "armed"
-                log.info("tracking armed on '%s', waiting for GO", rec["name"])
-                await self._go.wait()
+                if not go:
+                    if tr["phase"] != "done":            # back to the start point
+                        tr["phase"] = "arming"
+                        move = self._plan_move(pts[0]["pos"])
+                        go = await self._race(self._start_traj(move, "tracking", replace=True))
+                    if not go:
+                        if tr["phase"] != "done":
+                            tr["phase"] = "armed"
+                            log.info("tracking armed on '%s', waiting for GO", rec["name"])
+                        go = await self._race(None)
+                # GO: (re)start the lap now, gliding from the current state onto it
+                go = False
                 tr["phase"] = "running"
-                traj = PlaybackTrajectory(pts, vmax, self._track_speed, natural_ends=True)
-                await self._start_traj(traj, "tracking")
+                start_pos, start_vel = self._current_state(axes)
+                lap = PlaybackTrajectory(pts, vmax, self._track_speed, natural_ends=True)
+                traj = BlendIn(lap, start_pos, start_vel, vmax,
+                               {n: self.cfg.axes[n].max_accel for n in axes})
+                go = await self._race(self._start_traj(traj, "tracking", replace=True))
                 tr["runs"] += 1
+                if go:
+                    log.info("GO during lap %d: next lap starts now", tr["runs"])
+                    continue
                 log.info("tracking lap %d done", tr["runs"])
                 if not tr["auto_rearm"]:
-                    tr["phase"] = "done"
-                    break
+                    tr["phase"] = "done"                  # hold; a GO still starts a lap
         except MotionError as e:
             log.info("tracking stopped: %s", e)
             tr["phase"] = "idle"
@@ -973,15 +1037,38 @@ class MotionController:
             pass
 
     def track_go(self) -> None:
-        """Timing signal: start the armed lap now."""
-        phase = self.tracking["phase"]
-        if phase != "armed" or self._go is None:
-            raise MotionError({"arming": "not ready yet: still moving to the start point",
-                               "running": "a lap is already running"}.get(
-                                   phase, "tracking is not armed"))
-        self.tracking["phase"] = "running"        # visible at once, before the task wakes
+        """Timing signal: start the lap now. During a lap (or while returning
+        to the start) the current lap is dropped and the new one starts."""
+        tr = self.tracking
+        if self._go is None or tr["phase"] == "idle" or self._track_task is None:
+            raise MotionError("tracking is not armed: select a track and press ARM")
+        loop_now = asyncio.get_running_loop().time()
+        if self._last_go is not None:
+            interval = loop_now - self._last_go
+            tr["last_interval"] = round(interval, 3)
+            if tr["auto_adjust"]:
+                self._auto_adjust(interval)
+        self._last_go = loop_now
+        tr["phase"] = "running"                  # visible at once, before the task wakes
         self._go.set()
-        log.info("GO (speed x%.2f)", self._track_speed())
+        log.info("GO (lap time %.2f s, x%.2f)", self.current_lap_time() or 0,
+                 self._track_speed())
+
+    def _auto_adjust(self, interval: float) -> None:
+        tr = self.tracking
+        cur = self.current_lap_time()
+        if not cur:
+            return
+        dev = interval / cur - 1.0
+        if abs(dev) > tr["adjust_tolerance"]:
+            tr["adjust_note"] = (f"lap {interval:.2f} s ignored "
+                                 f"({dev * 100:+.0f} % vs {cur:.2f} s)")
+            log.info("auto adjust: %s", tr["adjust_note"])
+            return
+        new = (cur + interval) / 2.0
+        tr["target_lap"] = round(new, 3)
+        tr["adjust_note"] = f"lap {interval:.2f} s: next lap {cur:.2f} -> {new:.2f} s"
+        log.info("auto adjust: %s", tr["adjust_note"])
 
     async def track_abort(self) -> None:
         names = list(self._traj.axes) if self._traj is not None else None
@@ -1025,6 +1112,8 @@ class MotionController:
             "playback": playback,
             "recording": self.recorder.state(),
             "tracking": {**self.tracking, "speed_eff": round(self._track_speed(), 3),
+                         "current_lap": (round(self.current_lap_time(), 3)
+                                         if self.current_lap_time() else None),
                          "progress": round(self._traj.progress, 3)
                          if self._traj_kind == "tracking" and self._traj is not None else None},
             "error": self.last_error,

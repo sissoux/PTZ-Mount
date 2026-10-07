@@ -1,0 +1,17 @@
+[Unit]
+Description=PTZ camera head daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@ROOT@
+ExecStart=@ROOT@/.venv/bin/python -m ptz -c @ROOT@/config/ptz.cfg
+Restart=always
+RestartSec=2
+# real-time-ish: the daemon is not CPU hungry but must not be starved
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

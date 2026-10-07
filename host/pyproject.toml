@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptz"
+version = "0.1.0"
+description = "PTZ camera head controller (Raspberry Pi host for an RP2040 motion MCU)"
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp>=3.8",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+gamepad = ["pygame>=2.1"]
+
+[project.scripts]
+ptz = "ptz.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["ptz*"]
+
+[tool.setuptools.package-data]
+ptz = ["web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

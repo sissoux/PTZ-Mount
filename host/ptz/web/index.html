@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>PTZ Control</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>PTZ</h1>
+    <span id="conn" class="badge off">offline</span>
+    <span id="estop-badge" class="badge danger hidden">E-STOP</span>
+    <span id="error" class="error"></span>
+    <button id="btn-estop" class="estop">E-STOP</button>
+  </header>
+
+  <main>
+    <section class="card control">
+      <h2>Pan / Tilt</h2>
+      <div id="pad" class="pad"><div id="knob" class="knob"></div></div>
+      <div class="zoom">
+        <label>Zoom</label>
+        <input id="zoom" type="range" min="-1" max="1" step="0.01" value="0" orient="vertical">
+      </div>
+      <div class="row">
+        <label for="speed">Speed</label>
+        <input id="speed" type="range" min="0.05" max="1" step="0.05" value="1">
+        <span id="speed-val">100%</span>
+      </div>
+      <p class="hint">Keyboard: arrows = pan/tilt, PgUp/PgDn = zoom, Space = stop.
+        A gamepad plugged into this computer also works.</p>
+    </section>
+
+    <section class="card">
+      <h2>Axes</h2>
+      <table id="axes"><thead>
+        <tr><th>Axis</th><th>Position</th><th>Velocity</th><th>State</th><th>Go to</th></tr>
+      </thead><tbody></tbody></table>
+      <div class="row buttons">
+        <button id="btn-home">Home all</button>
+        <button id="btn-goto">Go to</button>
+        <button id="btn-stop">Stop</button>
+        <button id="btn-enable">Motors on</button>
+        <button id="btn-disable">Motors off</button>
+        <button id="btn-clear">Clear E-stop</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Presets</h2>
+      <div class="row">
+        <label><input id="save-mode" type="checkbox"> Save mode (click a preset to store current position)</label>
+      </div>
+      <div id="presets" class="presets"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

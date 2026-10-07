@@ -132,6 +132,10 @@ class VelocityShaper:
         # crossing the target with little acceleration left: land exactly
         if (target - self.v) * (target - v_new) <= 0 and abs(self.a) <= 2.0 * jerk * dt:
             v_new, self.a = target, 0.0
+        # inside the dead zone with no acceleration left the error would never
+        # shrink (residual creep with uneven tick times): land exactly
+        elif abs(target - v_new) <= jerk * dt * dt and abs(self.a) <= jerk * dt:
+            v_new, self.a = target, 0.0
         self.v = v_new
         return self.v
 
@@ -148,9 +152,11 @@ def braking_speed(dist: float, amax: float, smooth: float) -> float:
 # ============================================================ PCHIP
 class Pchip:
     """Monotone piecewise cubic (Fritsch-Carlson): goes through every point,
-    never overshoots between them. End slopes are 0 (ease in / ease out)."""
+    never overshoots between them. End slopes are 0 (ease in / ease out),
+    or follow the data with natural_ends=True (race tracking: the car crosses
+    the start line at full speed)."""
 
-    def __init__(self, ts: Sequence[float], ys: Sequence[float]):
+    def __init__(self, ts: Sequence[float], ys: Sequence[float], natural_ends: bool = False):
         if len(ts) != len(ys) or not ts:
             raise ValueError("Pchip needs matching, non-empty sequences")
         self.ts, self.ys = list(ts), list(ys)
@@ -165,6 +171,21 @@ class Pchip:
                 continue
             w1, w2 = 2 * h[k] + h[k - 1], h[k] + 2 * h[k - 1]
             self.m[k] = (w1 + w2) / (w1 / d[k - 1] + w2 / d[k])
+        if natural_ends:
+            self.m[0] = self._end_slope(h[0], h[1], d[0], d[1])
+            self.m[-1] = self._end_slope(h[-1], h[-2], d[-1], d[-2])
+
+    @staticmethod
+    def _end_slope(h0: float, h1: float, d0: float, d1: float) -> float:
+        """Shape-preserving 3-point end slope (as scipy's PCHIP)."""
+        if h0 + h1 <= 0:
+            return d0
+        m = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1)
+        if m * d0 <= 0:
+            return 0.0
+        if d0 * d1 <= 0 and abs(m) > abs(3 * d0):
+            return 3 * d0
+        return m
 
     @property
     def duration(self) -> float:
@@ -237,10 +258,11 @@ class PlaybackTrajectory:
     SPEED_SLEW = 2.0          # max change of the speed factor per second
 
     def __init__(self, points: List[dict], vmax: Dict[str, float],
-                 speed: Callable[[], float]):
+                 speed: Callable[[], float], natural_ends: bool = False):
         ts = [p["t"] for p in points]
         names = [n for n in points[0]["pos"] if n in vmax]
-        self.splines = {n: Pchip(ts, [p["pos"][n] for p in points]) for n in names}
+        self.splines = {n: Pchip(ts, [p["pos"][n] for p in points], natural_ends)
+                        for n in names}
         self.t0, self.duration = ts[0], ts[-1] - ts[0]
         self.vmax = vmax
         self.speed = speed

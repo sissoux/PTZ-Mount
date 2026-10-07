@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 
 from . import __version__
 from .config import ConfigError, load
@@ -19,12 +20,18 @@ from .motion import MotionController
 log = logging.getLogger("ptz")
 
 
-async def run(args) -> None:
-    cfg = load(args.config)
+async def run(args) -> bool:
+    """Run the daemon. Returns True if a restart was requested (web UI)."""
+    from .cfgfile import ConfigFiles
+    base = load(args.config)
+    files = ConfigFiles(args.config, args.state_dir or base.server.state_dir)
+    cfg = files.load_active()
+    log.info("configuration: %s%s", cfg.path,
+             " (edited copy)" if cfg.path == files.override else "")
+    if files.load_error:
+        log.error("%s", files.load_error)
     for w in cfg.warnings:
         log.warning("config: %s", w)
-    if args.state_dir:
-        cfg.server.state_dir = args.state_dir
 
     if args.sim:
         from .sim import SimTransport
@@ -34,10 +41,20 @@ async def run(args) -> None:
         transport = SerialTransport(args.serial or cfg.mcu.serial, cfg.mcu.baud)
 
     ctrl = MotionController(cfg, McuLink(transport))
+    ctrl.config_error = files.load_error
     await ctrl.start()
 
+    stop = asyncio.Event()
+    restart = []
+
+    def request_restart() -> None:
+        log.warning("restart requested from the web UI")
+        restart.append(True)
+        stop.set()
+
     from .api.http import HttpServer
-    servers = [HttpServer(ctrl, cfg.server.http_host, args.port or cfg.server.http_port)]
+    servers = [HttpServer(ctrl, cfg.server.http_host, args.port or cfg.server.http_port,
+                          files=files, restart=request_restart)]
     if cfg.server.udp_port:
         from .api.udp import UdpServer
         servers.append(UdpServer(ctrl, cfg.server.http_host, cfg.server.udp_port))
@@ -47,7 +64,6 @@ async def run(args) -> None:
     for s in servers:
         await s.start()
 
-    stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -70,6 +86,7 @@ async def run(args) -> None:
         for s in servers:
             await s.close()
         await ctrl.close()
+    return bool(restart)
 
 
 def main() -> None:
@@ -89,7 +106,10 @@ def main() -> None:
     if args.verbose:
         weblog.set_debug(True)
     try:
-        asyncio.run(run(args))
+        if asyncio.run(run(args)):
+            logging.shutdown()
+            # same PID, same arguments: works under systemd and by hand
+            os.execv(sys.executable, [sys.executable, "-m", "ptz"] + sys.argv[1:])
     except ConfigError as e:
         log.error("configuration error: %s", e)
         raise SystemExit(2)

@@ -21,7 +21,7 @@ main { display: grid; gap: 16px; padding: 16px; grid-template-columns: repeat(au
 .hidden { display: none !important; }
 .error { color: var(--danger); font-size: 12px; flex: 1; min-width: 0; }
 .muted { color: var(--muted); font-size: 12px; min-height: 1.4em; margin-top: 6px; }
-.debug-toggle { margin-left: auto; color: var(--muted); font-size: 12px; }
+.debug-toggle { color: var(--muted); font-size: 12px; }
 button { background: #2b3038; color: var(--text); border: 1px solid var(--line);
          border-radius: 6px; padding: 8px 12px; cursor: pointer; font: inherit; }
 button.small { padding: 3px 8px; font-size: 12px; }
@@ -115,3 +115,20 @@ a.btn { display: inline-block; text-decoration: none; color: var(--text); backgr
         border: 1px solid var(--line); border-radius: 6px; }
 a.btn.small { padding: 3px 8px; font-size: 12px; }
 a.btn:hover { border-color: var(--accent); }
+
+/* ---- v0.4: race tracking ---- */
+header .btn.small { margin-left: auto; }
+.race h3 { font-size: 12px; color: var(--text); margin: 14px 0 0; font-weight: 600; }
+.race h3:first-of-type { margin-top: 0; }
+input.short { width: 80px; flex: none; }
+input[type=number] { background: #15171a; color: var(--text); border: 1px solid var(--line);
+                     border-radius: 6px; padding: 6px 8px; font: inherit; }
+.lap-btn { width: 100%; margin-top: 12px; padding: 18px; font-size: 22px; font-weight: 700;
+           background: var(--accent); border-color: var(--accent); }
+.lap-btn small, .go-btn small { font-size: 11px; font-weight: 400; opacity: .8; }
+.go-btn { flex: 1; padding: 14px; font-size: 20px; font-weight: 700; background: var(--ok); border-color: var(--ok); }
+.go-btn:disabled { background: #2b3038; border-color: var(--line); }
+.lap-btn.flash { background: #fff; color: #000; }
+#lap-table { margin-top: 10px; }
+#lap-table tr.unused td { color: var(--muted); }
+code { font-size: 12px; background: #15171a; padding: 1px 4px; border-radius: 3px; }

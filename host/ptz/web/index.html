@@ -19,10 +19,12 @@
       <div id="clients-pop" class="popover hidden"></div>
     </div>
     <button id="btn-lock" class="small lock" title="Blocking mode: only you can move the head">🔒 Take control</button>
+    <a class="btn small" href="/settings" title="Edit the configuration file">⚙ Config</a>
     <label class="debug-toggle"><input id="debug-mode" type="checkbox"> Debug</label>
     <button id="btn-estop" class="estop">E-STOP</button>
   </header>
   <div id="lock-banner" class="lock-banner hidden"></div>
+  <div id="config-banner" class="lock-banner hidden"></div>
 
   <main>
     <section class="card control">
@@ -111,6 +113,48 @@
         <button id="btn-upload" class="small">⬆ Upload a path…</button>
         <input id="upload-file" type="file" accept=".json,application/json" class="hidden">
       </div>
+    </section>
+
+    <section class="card race">
+      <h2>Race tracking</h2>
+      <h3>1 · Learn the lap</h3>
+      <div class="row">
+        <input id="learn-name" type="text" placeholder="track name (e.g. Circuit)">
+        <button id="btn-learn" class="rec-btn">● Start learning</button>
+        <button id="btn-learn-cancel" class="hidden">Cancel</button>
+      </div>
+      <div id="learn-active" class="hidden">
+        <button id="btn-lap" class="lap-btn">LAP <small>(Space)</small></button>
+        <div id="learn-status" class="muted"></div>
+      </div>
+      <p class="hint">Follow the cars for as many laps as you like and press Space
+        (or LAP) each time a car crosses the start / timing line. On Stop, the laps
+        are averaged into one path at the mean lap time.</p>
+      <div id="build-result" class="hidden">
+        <table id="lap-table"><thead><tr><th>Use</th><th>Lap</th><th>Time</th><th>Deviation</th></tr></thead><tbody></tbody></table>
+        <div class="row"><button id="btn-rebuild" class="small">Rebuild with selected laps</button>
+          <span id="build-info" class="muted"></span></div>
+      </div>
+
+      <h3>2 · Track</h3>
+      <div class="row">
+        <select id="track-select"></select>
+        <label>Target lap <input id="target-lap" type="number" min="1" step="0.1" placeholder="learned" class="short"> s</label>
+      </div>
+      <div class="row">
+        <label><input id="auto-rearm" type="checkbox" checked> Auto re-arm after each lap</label>
+        <span id="track-speed" class="muted"></span>
+      </div>
+      <div class="row">
+        <button id="btn-arm">ARM</button>
+        <button id="btn-go" class="go-btn" disabled>GO <small>(Enter)</small></button>
+        <button id="btn-track-abort" disabled>Abort</button>
+      </div>
+      <div class="row"><div class="progress"><div id="track-progress"></div></div></div>
+      <div id="track-status" class="muted"></div>
+      <p class="hint">ARM moves to the start point and waits. GO starts the lap: here,
+        with Enter, or from the timing system: UDP <code>{"cmd":"track_go"}</code> to port 9000,
+        or HTTP POST /api/cmd. A joystick move or Stop aborts.</p>
     </section>
 
     <section id="debug-card" class="card debug hidden">

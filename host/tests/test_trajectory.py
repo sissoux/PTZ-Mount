@@ -102,3 +102,20 @@ def test_playback_speed_factor_and_velocity_cap():
         slow.advance(0.01)
         peak = max(peak, abs(slow.sample()["pan"][1]))
     assert peak <= 5.0 + 1e-6                  # never faster than the axis allows
+
+
+def test_velocity_shaper_settles_with_jittery_ticks():
+    """Regression: with uneven tick times the shaper could stop with a tiny
+    residual speed and a = 0, i.e. the axis kept creeping after a jog."""
+    import random
+    for seed in range(1500):
+        r = random.Random(seed)
+        amax = r.choice([10, 50, 400, 4000])
+        jerk = amax / r.choice([0.03, 0.06, 0.18, 0.6])
+        target = r.choice([0.0, r.uniform(-30, 30)])
+        sh = VelocityShaper()
+        for _ in range(100):
+            sh.step(r.uniform(-1, 1) * r.choice([5, 50, 200]), amax, jerk, r.uniform(0.005, 0.03))
+        for _ in range(600):
+            sh.step(target, amax, jerk, r.uniform(0.005, 0.03))
+        assert sh.v == target, (seed, sh.v, sh.a)

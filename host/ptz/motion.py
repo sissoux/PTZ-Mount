@@ -90,6 +90,11 @@ class MotionController:
                                  self._homed_positions, time.monotonic)
         self.playback: Optional[dict] = None
         self._play_task: Optional[asyncio.Task] = None
+        # race tracking: arm on a learned lap, GO on the timing signal
+        self.tracking = {"phase": "idle", "track": None, "lap_time": None, "speed": 1.0,
+                         "target_lap": None, "auto_rearm": True, "runs": 0}
+        self._track_task: Optional[asyncio.Task] = None
+        self._go: Optional[asyncio.Event] = None
         self._traj = None                     # MoveTrajectory | PlaybackTrajectory
         self._traj_kind = ""
         self._traj_future: Optional[asyncio.Future] = None
@@ -599,6 +604,11 @@ class MotionController:
             self._play_task.cancel()
         self._play_task = None
         self.playback = None
+        if self._track_task is not None and not self._track_task.done():
+            self._track_task.cancel()
+        self._track_task = None
+        if self.tracking["phase"] != "idle":
+            self.tracking["phase"] = "idle"
         self._cancel_traj(handover)
 
     # ================================================================ moves
@@ -884,6 +894,101 @@ class MotionController:
         if names:
             await self.stop(names)
 
+    # ================================================================ race tracking
+    def lap_mark(self) -> int:
+        n = self.recorder.lap_mark()
+        st = self.recorder.state()
+        if st.get("last_lap"):
+            log.info("lap mark %d (lap %d: %.2f s)", n, n - 1, st["last_lap"])
+        else:
+            log.info("lap mark %d (start line)", n)
+        return n
+
+    def build_track(self, source: str, exclude=(), name: str = "") -> dict:
+        summary = self.recorder.build_track(source, tuple(int(x) for x in exclude), name)
+        log.info("track '%s' built: lap time %.2f s, %d/%d laps used", summary["name"],
+                 summary["lap_time"], sum(1 for s in summary["laps"] if s["used"]),
+                 len(summary["laps"]))
+        return summary
+
+    def _track_speed(self) -> float:
+        tr = self.tracking
+        if tr["target_lap"] and tr["lap_time"]:
+            return tr["lap_time"] / tr["target_lap"]
+        return tr["speed"]
+
+    def track_set(self, speed: Optional[float] = None, target_lap: Optional[float] = None,
+                  auto_rearm: Optional[bool] = None) -> None:
+        """speed: replay factor. target_lap: expected lap time in seconds
+        (overrides speed; 0 clears it). auto_rearm: return to the start point
+        after each lap and wait for the next GO."""
+        tr = self.tracking
+        if speed is not None:
+            tr["speed"] = clamp(float(speed), 0.1, 4.0)
+        if target_lap is not None:
+            tr["target_lap"] = float(target_lap) if float(target_lap) > 0 else None
+        if auto_rearm is not None:
+            tr["auto_rearm"] = bool(auto_rearm)
+
+    async def track_arm(self, name: str) -> None:
+        """Move to the start point of a learned lap and wait for GO."""
+        self._check_ready()
+        rec = self.recorder.load(name)
+        axes = [n for n in rec["points"][0]["pos"] if n in self.state]
+        if not axes:
+            raise MotionError("track uses no configured axis")
+        for n in axes:
+            if not self.state[n].homed:
+                raise MotionError(f"axis '{n}' is not homed")
+        self._cancel_motion()
+        self.tracking.update(phase="arming", track=rec["name"], runs=0,
+                             lap_time=rec.get("lap_time") or rec.get("duration"))
+        self._go = asyncio.Event()
+        self._track_task = asyncio.get_running_loop().create_task(self._track_run(rec, axes))
+
+    async def _track_run(self, rec: dict, axes: List[str]) -> None:
+        pts = [{"t": p["t"], "pos": {n: p["pos"][n] for n in axes}} for p in rec["points"]]
+        vmax = {n: self.cfg.axes[n].max_velocity for n in axes}
+        tr = self.tracking
+        try:
+            while True:
+                tr["phase"] = "arming"
+                await self.goto(pts[0]["pos"], wait=True)
+                self._go.clear()
+                tr["phase"] = "armed"
+                log.info("tracking armed on '%s', waiting for GO", rec["name"])
+                await self._go.wait()
+                tr["phase"] = "running"
+                traj = PlaybackTrajectory(pts, vmax, self._track_speed, natural_ends=True)
+                await self._start_traj(traj, "tracking")
+                tr["runs"] += 1
+                log.info("tracking lap %d done", tr["runs"])
+                if not tr["auto_rearm"]:
+                    tr["phase"] = "done"
+                    break
+        except MotionError as e:
+            log.info("tracking stopped: %s", e)
+            tr["phase"] = "idle"
+        except asyncio.CancelledError:
+            pass
+
+    def track_go(self) -> None:
+        """Timing signal: start the armed lap now."""
+        phase = self.tracking["phase"]
+        if phase != "armed" or self._go is None:
+            raise MotionError({"arming": "not ready yet: still moving to the start point",
+                               "running": "a lap is already running"}.get(
+                                   phase, "tracking is not armed"))
+        self.tracking["phase"] = "running"        # visible at once, before the task wakes
+        self._go.set()
+        log.info("GO (speed x%.2f)", self._track_speed())
+
+    async def track_abort(self) -> None:
+        names = list(self._traj.axes) if self._traj is not None else None
+        self._cancel_motion()
+        if names:
+            await self.stop(names)
+
     # ================================================================ status
     def status(self) -> dict:
         axes = {}
@@ -919,6 +1024,10 @@ class MotionController:
             "motion": self._traj_kind,
             "playback": playback,
             "recording": self.recorder.state(),
+            "tracking": {**self.tracking, "speed_eff": round(self._track_speed(), 3),
+                         "progress": round(self._traj.progress, 3)
+                         if self._traj_kind == "tracking" and self._traj is not None else None},
             "error": self.last_error,
+            "config_error": getattr(self, "config_error", ""),
             "axes": axes,
         }

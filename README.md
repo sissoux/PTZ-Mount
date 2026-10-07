@@ -62,6 +62,30 @@ pytest
 Follow [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md): enable the
 UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`.
 
+## Race tracking
+
+1. **Learn.** In "Race tracking", enter a name and press **Start learning**.
+   Follow the cars by hand (pad, gamepad, joystick) for as many laps as you
+   like. Press **Space** (or LAP) each time a car crosses the start / timing
+   line. Press **Stop & build**.
+2. **Average.** The session is cut into laps at your marks. Each lap is
+   stretched to the same length and the laps are averaged point by point.
+   Laps far from the others are rejected automatically. The table shows each
+   lap's time and deviation; untick laps and press Rebuild to choose by hand.
+   The track replays at the mean lap time. The raw session is kept as
+   "name (raw)".
+3. **Track.** Select the track and press **ARM**: the head goes to the start
+   point and waits. On the timing signal press **GO** (or Enter), or let the
+   timing system send it:
+   ```sh
+   echo '{"cmd":"track_go"}' | nc -u -w0 <pi-address> 9000      # UDP
+   curl -X POST <pi-address>:8080/api/cmd -d '{"cmd":"track_go"}'
+   ```
+   `track_go` is accepted even in blocking mode: it only fires the lap the
+   operator armed. A *Target lap* time (s) rescales the replay speed for
+   faster or slower cars. With *Auto re-arm*, the head returns to the start
+   point after each lap. A joystick move, Stop or Abort cancels.
+
 ## Control interfaces
 
 | Interface | Port | Use |
@@ -101,6 +125,14 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   released when you click again or close the page. From the Pi, a stuck lock
   can be forced open:
   `curl -X POST localhost:8080/api/cmd -d '{"cmd":"unlock","force":true}'`
+* **Race tracking**: learn a lap path, then fire it when a car crosses the
+  timing line. See below.
+* **⚙ Config** page: edit the configuration in the browser. The file is
+  checked before saving, the previous version is kept as a backup, and
+  "Save & restart" applies it. Edits go to `~/.ptz/ptz.cfg`, which replaces
+  `config/ptz.cfg` without modifying the repository, so `git pull` keeps
+  working. "Reset to default" goes back to the repository file. If the edited
+  file ever fails to load, the daemon starts with the default and says so.
 * **Debug mode** (top right): verbose logging and a live console showing
   every command with its source, rejections, MCU events and endstop changes,
   plus a driver diagnostics button.

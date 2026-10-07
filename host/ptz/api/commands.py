@@ -26,6 +26,15 @@ Recording / replay
     {"cmd": "recording_rename", "name": "...", "new": "..."}
     {"cmd": "play", "name": "...", "speed": 1.0, "loop": false}
     {"cmd": "play_set", "speed": 2.0, "loop": true}   {"cmd": "play_stop"}
+Race tracking
+    {"cmd": "record_start", "mode": "laps", "name": "Circuit"}   learning session
+    {"cmd": "lap_mark"}            car on the start line (Space in the web UI)
+    {"cmd": "record_stop"}         -> averaged track "Circuit" (+ "Circuit (raw)")
+    {"cmd": "track_build", "source": "Circuit (raw)", "exclude": [2]}  rebuild
+    {"cmd": "track_arm", "name": "Circuit"}      go to the start point and wait
+    {"cmd": "track_go"}            timing signal: start the lap now (open to all)
+    {"cmd": "track_set", "target_lap": 92.5, "speed": 1.0, "auto_rearm": true}
+    {"cmd": "track_abort"}
 Blocking mode (web clients only)
     {"cmd": "lock"}   {"cmd": "unlock"}   {"cmd": "unlock", "force": true} (from the Pi)
     While locked, only the owner may send control commands; "stop", "estop"
@@ -52,7 +61,8 @@ _RESERVED = {"cmd", "id", "speed", "wait", "axes", "on"}
 _QUIET = {"jog", "status", "config", "presets", "recordings", "diag"}
 # allowed to everyone, even when another client holds the lock
 _OPEN = {"stop", "estop", "status", "config", "presets", "recordings", "diag",
-         "debug", "lock", "unlock"}
+         "debug", "lock", "unlock",
+         "track_go"}     # the timing system may fire what the operator armed
 _last_jog_log = [0.0]
 
 
@@ -163,6 +173,22 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             ctrl.set_play(speed=msg.get("speed"), loop=msg.get("loop"))
         elif cmd == "play_stop":
             await ctrl.play_stop()
+        # ------------------------------------------------ race tracking
+        elif cmd == "lap_mark":
+            reply["marks"] = ctrl.lap_mark()
+        elif cmd == "track_build":
+            reply["recording"] = ctrl.build_track(msg["source"], msg.get("exclude", []),
+                                                  msg.get("name", ""))
+            reply["recordings"] = ctrl.recorder.list()
+        elif cmd == "track_arm":
+            await ctrl.track_arm(msg["name"])
+        elif cmd == "track_go":
+            ctrl.track_go()
+        elif cmd == "track_set":
+            ctrl.track_set(speed=msg.get("speed"), target_lap=msg.get("target_lap"),
+                           auto_rearm=msg.get("auto_rearm"))
+        elif cmd == "track_abort":
+            await ctrl.track_abort()
         # ------------------------------------------------ info / debug
         elif cmd == "status":
             reply["status"] = ctrl.status()

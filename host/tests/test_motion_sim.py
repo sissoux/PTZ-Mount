@@ -442,3 +442,63 @@ def test_require_homing_can_be_disabled(tmp_path):
         await asyncio.sleep(0.2)
         assert ctrl.state["tilt"].vel != 0
     run(t, tmp_path, text)
+
+
+def test_race_learning_and_tracking(tmp_path, monkeypatch):
+    import ptz.track
+    monkeypatch.setattr(ptz.track, "MIN_LAP_S", 0.2)     # simulated laps are short
+
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+        assert (await dispatch(ctrl, {"cmd": "record_start", "mode": "laps",
+                                      "name": "Circuit"}))["ok"]
+        # 3 laps: start line at pan 0, the car goes to pan 40 and comes back
+        ctrl.lap_mark()
+        for lap in range(3):
+            await ctrl.goto({"pan": 40, "tilt": 10}, wait=True)
+            await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+            ctrl.lap_mark()
+        r = await dispatch(ctrl, {"cmd": "record_stop"})
+        assert r["ok"], r
+        track = r["recording"]
+        assert track["mode"] == "track" and track["name"] == "Circuit"
+        assert len(track["laps"]) == 3 and track["lap_time"] > 0.3
+        names = {x["name"]: x["mode"] for x in r["recordings"]}
+        assert names == {"Circuit": "track", "Circuit (raw)": "laps-raw"}
+        # rebuild without lap 2
+        r = await dispatch(ctrl, {"cmd": "track_build", "source": "Circuit (raw)",
+                                  "exclude": [2]})
+        assert [s["used"] for s in r["recording"]["laps"]] == [True, False, True]
+
+        # tracking: arm, GO from the "timing system" even while a page holds the lock
+        await ctrl.goto({"pan": 20}, wait=True)
+        assert (await dispatch(ctrl, {"cmd": "track_arm", "name": "Circuit"}))["ok"]
+        assert not (await dispatch(ctrl, {"cmd": "track_go"}))["ok"] \
+            or ctrl.tracking["phase"] == "armed"
+        for _ in range(200):
+            if ctrl.tracking["phase"] == "armed":
+                break
+            await asyncio.sleep(0.02)
+        assert ctrl.tracking["phase"] == "armed"
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.1)
+        await dispatch(ctrl, {"cmd": "lock"}, client="operator")
+        assert (await dispatch(ctrl, {"cmd": "track_go"}, source="udp timing"))["ok"]
+        assert ctrl.tracking["phase"] == "running"
+        await dispatch(ctrl, {"cmd": "unlock"}, client="operator")
+        peak = 0.0
+        for _ in range(500):
+            peak = max(peak, ctrl.position("pan"))
+            if ctrl.tracking["runs"] == 1 and ctrl.tracking["phase"] == "armed":
+                break
+            await asyncio.sleep(0.01)
+        assert peak > 30                       # it really followed the lap
+        assert ctrl.tracking["runs"] == 1 and ctrl.tracking["phase"] == "armed"  # re-armed
+        # target lap time sets the speed factor
+        ctrl.track_set(target_lap=track["lap_time"] / 2)
+        assert ctrl.status()["tracking"]["speed_eff"] == pytest.approx(2.0, rel=0.05)
+        assert (await dispatch(ctrl, {"cmd": "track_abort"}))["ok"]
+        assert ctrl.tracking["phase"] == "idle"
+        with pytest.raises(Exception):
+            ctrl.track_go()
+    run(t, tmp_path)

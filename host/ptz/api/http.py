@@ -13,6 +13,7 @@ from typing import Dict
 from aiohttp import WSMsgType, web
 
 from .. import weblog
+from ..config import ConfigError
 from ..motion import LOCAL_ADDRESSES, MotionController
 from ..recorder import RecorderError
 from .commands import config_summary, dispatch
@@ -38,7 +39,10 @@ def _agent(ua: str) -> str:
 class WebClient:
     def __init__(self, ws: web.WebSocketResponse, request: web.Request):
         self.ws = ws
-        self.id = uuid.uuid4().hex[:8]
+        # per-browser token (localStorage): every tab of a browser is the same
+        # client for blocking mode, including the settings page
+        token = request.query.get("token", "")
+        self.id = token if re.fullmatch(r"[A-Za-z0-9]{8,40}", token) else uuid.uuid4().hex[:8]
         self.ip = request.remote or "?"
         self.agent = _agent(request.headers.get("User-Agent", ""))
         self.since = time.time()
@@ -49,14 +53,24 @@ class WebClient:
 
 
 class HttpServer:
-    def __init__(self, ctrl: MotionController, host: str, port: int):
+    def __init__(self, ctrl: MotionController, host: str, port: int,
+                 files=None, restart=None):
         self.ctrl, self.host, self.port = ctrl, host, port
+        self.files = files            # cfgfile.ConfigFiles (settings page)
+        self.restart = restart        # callable: restart the daemon
         self.clients: Dict[web.WebSocketResponse, WebClient] = {}
         self.log_clients = set()
         self.logs = weblog.install()
         self.app = web.Application(client_max_size=MAX_UPLOAD)
         self.app.add_routes([
             web.get("/", self._index),
+            web.get("/settings", self._settings_page),
+            web.get("/api/config/file", self._cfg_get),
+            web.post("/api/config/validate", self._cfg_validate),
+            web.post("/api/config/file", self._cfg_save),
+            web.post("/api/config/reset", self._cfg_reset),
+            web.get("/api/config/backups/{name}", self._cfg_backup),
+            web.post("/api/restart", self._restart),
             web.get("/ws", self._ws),
             web.get("/api/status", self._status),
             web.get("/api/config", self._config),
@@ -123,6 +137,79 @@ class HttpServer:
     # ------------------------------------------------------------ REST
     async def _index(self, request):
         return web.FileResponse(os.path.join(WEB_ROOT, "index.html"))
+
+    async def _settings_page(self, request):
+        return web.FileResponse(os.path.join(WEB_ROOT, "settings.html"))
+
+    # ------------------------------------------------------------ config editor
+    def _denied(self, request):
+        """Lock check for state-changing requests (blocking mode)."""
+        if self.ctrl.may_control(request.headers.get("X-PTZ-Client")):
+            return None
+        return web.json_response({"ok": False, "error":
+                                  f"control is locked by {self.ctrl.lock_label}"}, status=403)
+
+    async def _text_body(self, request) -> str:
+        data = await request.json()
+        if not isinstance(data, dict) or not isinstance(data.get("text"), str):
+            raise ValueError("expected {\"text\": \"...\"}")
+        return data["text"]
+
+    async def _cfg_get(self, request):
+        if self.files is None:
+            return web.json_response({"ok": False, "error": "not available"}, status=404)
+        return web.json_response({"ok": True, "text": self.files.read(), **self.files.info(),
+                                  "running": self.ctrl.cfg.path})
+
+    async def _cfg_validate(self, request):
+        try:
+            text = await self._text_body(request)
+        except (ValueError, json.JSONDecodeError) as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        cfg, error = self.files.validate(text)
+        if cfg is None:
+            return web.json_response({"ok": False, "error": error})
+        return web.json_response({"ok": True, "warnings": cfg.warnings,
+                                  "axes": [a.name for a in sorted(cfg.axes.values(),
+                                                                  key=lambda a: a.index)],
+                                  "disabled_axes": cfg.disabled_axes})
+
+    async def _cfg_save(self, request):
+        denied = self._denied(request)
+        if denied:
+            return denied
+        try:
+            text = await self._text_body(request)
+            warnings = self.files.save(text)
+        except (ValueError, json.JSONDecodeError, ConfigError) as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        log.warning("configuration saved to %s (restart to apply)", self.files.override)
+        return web.json_response({"ok": True, "warnings": warnings, **self.files.info()})
+
+    async def _cfg_reset(self, request):
+        denied = self._denied(request)
+        if denied:
+            return denied
+        self.files.reset()
+        log.warning("edited configuration removed: back to %s (restart to apply)",
+                    self.files.default)
+        return web.json_response({"ok": True, **self.files.info()})
+
+    async def _cfg_backup(self, request):
+        try:
+            text = self.files.read_backup(request.match_info["name"])
+        except (ConfigError, OSError) as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=404)
+        return web.json_response({"ok": True, "text": text})
+
+    async def _restart(self, request):
+        denied = self._denied(request)
+        if denied:
+            return denied
+        if self.restart is None:
+            return web.json_response({"ok": False, "error": "restart not available"}, status=400)
+        asyncio.get_running_loop().call_later(0.5, self.restart)
+        return web.json_response({"ok": True})
 
     async def _status(self, request):
         return web.json_response(self.ctrl.status())
@@ -238,7 +325,8 @@ class HttpServer:
             self.log_clients.discard(ws)
             if jogging and self.ctrl.may_control(me.id):   # vanished while jogging
                 self.ctrl.jog({k: 0.0 for k in jogging})
-            if self.ctrl.lock_owner == me.id:
+            still_here = any(c.id == me.id for c in self.clients.values())
+            if self.ctrl.lock_owner == me.id and not still_here:
                 self.ctrl.unlock(me.id)
                 log.info("lock released: owner %s disconnected", me.label)
             log.info("web client disconnected: %s, %d connected", me.label, len(self.clients))

@@ -11,11 +11,21 @@ let ws = null, config = null, presets = {}, status = null, recordings = [];
 let logEntries = [], myId = null, clients = [];
 
 const $ = (id) => document.getElementById(id);
+// per-browser identity (blocking mode is shared by every tab of this browser)
+const TOKEN = (() => {
+  let t = null;
+  try { t = localStorage.getItem("ptz-token"); } catch (e) { /* private mode */ }
+  if (!t) {
+    t = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
+    try { localStorage.setItem("ptz-token", t); } catch (e) { /* ignore */ }
+  }
+  return t;
+})();
 const input = { pad: { x: 0, y: 0 }, zoom: 0, keys: { x: 0, y: 0, z: 0 }, gp: { x: 0, y: 0, z: 0 } };
 
 // ------------------------------------------------------------ websocket
 function connect() {
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${TOKEN}`);
   ws.onopen = () => { if ($("debug-mode").checked) send({ cmd: "logs", on: true }); };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
@@ -23,7 +33,7 @@ function connect() {
       case "status": renderStatus(m); break;
       case "config": config = m; onConfig(); break;
       case "presets": presets = m.presets; renderPresets(); break;
-      case "recordings": recordings = m.recordings; renderRecordings(); break;
+      case "recordings": recordings = m.recordings; renderRecordings(); renderTrackSelect(); break;
       case "clients": myId = m.you; clients = m.clients; renderClients(); break;
       case "debug": setDebugUi(m.on); break;
       case "log": addLog(m); break;
@@ -36,6 +46,9 @@ function connect() {
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function onReply(m) {
   if (!m.ok) { showError(m.error); return; }
+  if ((m.cmd === "record_stop" || m.cmd === "track_build") && m.recording && m.recording.mode === "track") {
+    showBuild(m.recording);
+  }
   if (m.cmd === "diag") {
     addLog({ t: Date.now() / 1000, level: "INFO", name: "diag", msg: JSON.stringify(m.diag, null, 2) });
   }
@@ -155,6 +168,9 @@ function renderStatus(s) {
   renderLock(s.lock);
   renderClients();
   renderRecorder(s.recording || {}, s.playback);
+  renderTracking(s.tracking || {}, s.recording || {});
+  $("config-banner").classList.toggle("hidden", !s.config_error);
+  $("config-banner").textContent = s.config_error ? `Configuration: ${s.config_error}` : "";
 }
 
 function renderSettings(st) {
@@ -308,8 +324,10 @@ function renderRecordings() {
   for (const r of recordings) {
     const tr = document.createElement("tr");
     tr.dataset.name = r.name;
+    const kind = { keypoints: `${r.points} keypoints`, track: `track ${r.laps ? r.laps.filter((l) => l.used).length + " laps" : ""}`,
+                   "laps-raw": `learning ${r.marks ? r.marks - 1 + " laps" : ""}` }[r.mode] || "path";
     tr.innerHTML = `<td>${escapeHtml(r.name)}</td>
-      <td class="muted">${r.mode === "keypoints" ? `${r.points} keypoints` : "path"}</td>
+      <td class="muted">${kind}</td>
       <td class="num">${r.duration.toFixed(1)} s</td>
       <td class="actions">
         <button class="small" data-a="play" title="Replay">▶</button>
@@ -358,12 +376,102 @@ $("upload-file").onchange = async () => {
   try {
     const r = await fetch(`/api/recordings?name=${encodeURIComponent(name)}`, {
       method: "POST", body: JSON.stringify(data),
-      headers: { "Content-Type": "application/json", "X-PTZ-Client": myId || "" },
+      headers: { "Content-Type": "application/json", "X-PTZ-Client": TOKEN },
     });
     const res = await r.json();
     if (!res.ok) showError(`Upload refused: ${res.error}`);
     else $("rec-status").textContent = `Uploaded "${res.recording.name}" (${res.recording.points} points, ${res.recording.duration.toFixed(1)} s)`;
   } catch (e) { showError(`Upload failed: ${e}`); }
+};
+
+// ------------------------------------------------------------ race tracking
+const learning = () => !!(status && status.recording && status.recording.active && status.recording.mode === "laps");
+function lapMark() {
+  send({ cmd: "lap_mark", id: "lap" });
+  const b = $("btn-lap");
+  b.classList.add("flash");
+  setTimeout(() => b.classList.remove("flash"), 150);
+}
+$("btn-lap").onclick = lapMark;
+$("btn-learn").onclick = () => {
+  if (learning()) send({ cmd: "record_stop", id: "learn-stop" });
+  else send({ cmd: "record_start", mode: "laps", name: $("learn-name").value.trim(), id: "learn" });
+};
+$("btn-learn-cancel").onclick = () => {
+  if (confirm("Discard this learning session?")) send({ cmd: "record_cancel", id: "lc" });
+};
+
+let lastBuild = null;
+function showBuild(track) {
+  lastBuild = track;
+  $("build-result").classList.remove("hidden");
+  const tb = $("lap-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const l of track.laps || []) {
+    const tr = document.createElement("tr");
+    tr.className = l.used ? "" : "unused";
+    tr.innerHTML = `<td><input type="checkbox" data-lap="${l.lap}" ${l.used ? "checked" : ""}></td>
+      <td>${l.lap}</td><td class="num">${l.duration.toFixed(2)} s</td><td class="num">${l.deviation.toFixed(2)}</td>`;
+    tb.appendChild(tr);
+  }
+  $("build-info").textContent = `"${track.name}": lap time ${track.lap_time.toFixed(2)} s`;
+  renderTrackSelect(track.name);
+}
+$("btn-rebuild").onclick = () => {
+  if (!lastBuild) return;
+  const exclude = [...document.querySelectorAll("#lap-table input[data-lap]")]
+    .filter((c) => !c.checked).map((c) => parseInt(c.dataset.lap, 10));
+  send({ cmd: "track_build", source: lastBuild.source, name: lastBuild.name, exclude, id: "rebuild" });
+};
+
+function renderTrackSelect(selectName) {
+  const sel = $("track-select"), cur = selectName || sel.value;
+  const tracks = recordings.filter((r) => r.mode === "track");
+  sel.innerHTML = tracks.length
+    ? tracks.map((r) => `<option value="${escapeHtml(r.name)}">${escapeHtml(r.name)} - ${(r.lap_time || r.duration).toFixed(1)} s</option>`).join("")
+    : `<option value="">no learned track yet</option>`;
+  if (tracks.some((r) => r.name === cur)) sel.value = cur;
+}
+
+function renderTracking(tr, rec) {
+  const isLearning = rec.active && rec.mode === "laps";
+  $("btn-learn").textContent = isLearning ? "■ Stop & build" : "● Start learning";
+  $("btn-learn").classList.toggle("recording", isLearning);
+  $("btn-learn-cancel").classList.toggle("hidden", !isLearning);
+  $("learn-active").classList.toggle("hidden", !isLearning);
+  if (isLearning) {
+    $("learn-status").textContent = rec.marks === 0
+      ? "Recording. Press LAP / Space when the car crosses the start line."
+      : `${rec.laps} lap(s) done` + (rec.last_lap ? `, last ${rec.last_lap.toFixed(2)} s` : "")
+        + ` - current lap ${rec.lap_elapsed.toFixed(1)} s`;
+  }
+  const phase = tr.phase || "idle";
+  $("btn-go").disabled = phase !== "armed";
+  $("btn-arm").disabled = phase === "arming" || phase === "running";
+  $("btn-track-abort").disabled = phase === "idle" || phase === "done";
+  $("track-progress").style.width = tr.progress != null ? `${Math.round(tr.progress * 100)}%` : "0";
+  $("track-speed").textContent = tr.lap_time
+    ? `Learned lap ${tr.lap_time.toFixed(2)} s - replay ×${tr.speed_eff.toFixed(2)}` : "";
+  if (document.activeElement !== $("auto-rearm")) $("auto-rearm").checked = tr.auto_rearm !== false;
+  if (document.activeElement !== $("target-lap")) $("target-lap").value = tr.target_lap || "";
+  $("track-status").textContent = {
+    idle: "", done: `Lap done (${tr.runs}). Press ARM for the next one.`,
+    arming: `Moving to the start point of "${tr.track}"…`,
+    armed: `ARMED on "${tr.track}": waiting for GO` + (tr.runs ? ` (${tr.runs} lap(s) done)` : ""),
+    running: `Tracking lap ${tr.runs + 1}…`,
+  }[phase] || phase;
+}
+$("btn-arm").onclick = () => {
+  const name = $("track-select").value;
+  if (!name) { showError("learn a track first"); return; }
+  send({ cmd: "track_arm", name, id: "arm" });
+};
+$("btn-go").onclick = () => send({ cmd: "track_go", id: "go" });
+$("btn-track-abort").onclick = () => send({ cmd: "track_abort", id: "ta" });
+$("auto-rearm").onchange = () => send({ cmd: "track_set", auto_rearm: $("auto-rearm").checked });
+$("target-lap").onchange = () => {
+  const v = parseFloat($("target-lap").value);
+  send({ cmd: "track_set", target_lap: isNaN(v) ? 0 : v, id: "tl" });
 };
 
 // ------------------------------------------------------------ pad (pan/tilt)
@@ -398,12 +506,22 @@ const KEYS = { ArrowLeft: ["x", -1], ArrowRight: ["x", 1], ArrowUp: ["y", 1], Ar
 document.addEventListener("keydown", (e) => {
   if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) && e.target.type !== "range"
       && e.target.type !== "checkbox") return;
-  if (e.code === "Space") { send({ cmd: "stop" }); e.preventDefault(); return; }
+  if (e.code === "Space") {
+    if (learning()) lapMark(); else send({ cmd: "stop" });
+    e.preventDefault(); return;
+  }
+  if (e.key === "Enter" && status && status.tracking && status.tracking.phase === "armed") {
+    send({ cmd: "track_go", id: "go" }); e.preventDefault(); return;
+  }
   if (e.key === "Escape") { send({ cmd: "estop" }); e.preventDefault(); return; }
   const k = KEYS[e.key]; if (!k) return;
   input.keys[k[0]] = k[1] * (e.shiftKey ? 0.3 : 1); e.preventDefault();
 });
-document.addEventListener("keyup", (e) => { const k = KEYS[e.key]; if (k) input.keys[k[0]] = 0; });
+document.addEventListener("keyup", (e) => {
+  const k = KEYS[e.key]; if (k) input.keys[k[0]] = 0;
+  // Space is our hotkey: never let it also "click" the focused button
+  if (e.code === "Space" && e.target.tagName === "BUTTON") e.preventDefault();
+});
 
 // ------------------------------------------------------------ gamepad (browser Gamepad API)
 function pollGamepad() {
@@ -492,4 +610,5 @@ $("btn-diag").onclick = () => send({ cmd: "diag", id: "diag" });
 
 renderPresets();
 renderRecordings();
+renderTrackSelect();
 connect();

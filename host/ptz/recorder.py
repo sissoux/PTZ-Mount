@@ -20,10 +20,15 @@ import json
 import os
 import re
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+
+from .track import TrackError, average_laps, split_laps
 
 RATE_HZ = 20.0
-MODES = ("continuous", "keypoints")
+MODES = ("continuous", "keypoints", "laps")
+# Recording kinds on disk: continuous, keypoints, laps-raw (learning session
+# with lap marks), track (averaged lap built from a laps-raw session)
+EXTRA_KEYS = ("markers", "laps", "lap_time", "source")
 MOVE_EPS = 0.01       # units: movement that starts an armed recording
 TRIM_EPS = 0.01       # units: tolerance of the motionless end
 MAX_POINTS = 200_000
@@ -34,7 +39,7 @@ class RecorderError(Exception):
 
 
 def _safe_name(name: str) -> str:
-    name = re.sub(r"[^A-Za-z0-9 _.-]", "_", name).strip(" .")
+    name = re.sub(r"[^A-Za-z0-9 _.()-]", "_", name).strip(" .")
     return name[:60] or time.strftime("rec-%Y%m%d-%H%M%S")
 
 
@@ -58,6 +63,7 @@ class Recorder:
         self.mode = "continuous"
         self.name = ""
         self.points: List[dict] = []
+        self.markers: List[float] = []       # lap marks (laps mode)
         self.armed = False                   # waiting for the first movement
         self.trim = False
         self._baseline: Dict[str, float] = {}
@@ -74,7 +80,9 @@ class Recorder:
         if not self._positions():
             raise RecorderError("home the axes before recording")
         self.mode, self.name = mode, _safe_name(name) if name else ""
-        self.points, self.active = [], True
+        self.points, self.markers, self.active = [], [], True
+        if mode == "laps":
+            on_move = False                  # the lap marks define the useful part
         self.armed = self.trim = bool(on_move)
         if self.armed:
             self._baseline = self._positions()
@@ -97,8 +105,17 @@ class Recorder:
                                                   for n, v in self._baseline.items()}}]
                 self._add(now)
             return
-        if self.mode == "continuous" and now - self._last_sample >= 1.0 / RATE_HZ:
+        if self.mode in ("continuous", "laps") and now - self._last_sample >= 1.0 / RATE_HZ:
             self._add(now)
+
+    def lap_mark(self) -> int:
+        """Learning mode: the car passes the start / timing line now."""
+        if not self.active or self.mode != "laps":
+            raise RecorderError("lap marks are only used while learning a track")
+        now = self._clock()
+        self._add(now)                       # exact position at the mark
+        self.markers.append(round(now - self._t0, 4))
+        return len(self.markers)
 
     def keypoint(self) -> int:
         if not self.active:
@@ -120,8 +137,10 @@ class Recorder:
         last = self.points[-1]["pos"]
         now_pos = self._positions()
         moved = any(abs(now_pos.get(n, v) - v) > 1e-3 for n, v in last.items())
-        if self.mode == "continuous" or moved:
+        if self.mode in ("continuous", "laps") or moved:
             self._add()
+        if self.mode == "laps":
+            return self._finish_learning()
         if self.trim:
             self.points = trim_idle_end(self.points)
         if len(self.points) < 2:
@@ -129,9 +148,37 @@ class Recorder:
         name = self.name or time.strftime("rec-%Y%m%d-%H%M%S")
         return self._save({"name": name, "mode": self.mode, "points": self.points})
 
+    def _finish_learning(self) -> dict:
+        name = self.name or time.strftime("track-%Y%m%d-%H%M")
+        if len(self.markers) < 2:
+            raise RecorderError("no complete lap: press the lap key each time you pass "
+                                "the start line (at least twice)")
+        raw = self._save({"name": f"{name} (raw)", "mode": "laps-raw",
+                          "points": self.points, "markers": self.markers})
+        return self.build_track(raw["name"], name=name)
+
+    def build_track(self, raw_name: str, exclude: Tuple[int, ...] = (),
+                    name: str = "") -> dict:
+        """(Re)build the averaged lap of a learning session."""
+        raw = self.load(raw_name)
+        if raw.get("mode") != "laps-raw":
+            raise RecorderError(f"'{raw_name}' is not a learning session")
+        try:
+            laps = split_laps(raw["points"], raw.get("markers", []))
+            points, stats = average_laps(laps, tuple(exclude), auto_reject=not exclude)
+        except TrackError as e:
+            raise RecorderError(str(e)) from None
+        if not name:
+            name = raw["name"][:-6] if raw["name"].endswith(" (raw)") else raw["name"] + " track"
+        used = [s for s in stats if s["used"]]
+        return self._save({"name": name, "mode": "track", "points": points,
+                           "laps": stats, "source": raw["name"],
+                           "lap_time": round(sum(s["duration"] for s in used) / len(used), 3)})
+
     def cancel(self) -> None:
         self.active = self.armed = False
         self.points = []
+        self.markers = []
 
     def _save(self, data: dict, overwrite: bool = True) -> dict:
         name = _safe_name(data["name"])
@@ -139,9 +186,10 @@ class Recorder:
             base, i = name, 2
             while os.path.exists(self._path(name)):
                 name, i = f"{base} ({i})", i + 1
+        extra = {k: data[k] for k in EXTRA_KEYS if k in data}
         data = {"name": name, "mode": data.get("mode", "continuous"),
                 "created": time.time(), "duration": round(data["points"][-1]["t"], 3),
-                "points": data["points"]}
+                **extra, "points": data["points"]}
         os.makedirs(self.dir, exist_ok=True)
         path = self._path(name)
         tmp = path + ".tmp"
@@ -186,10 +234,16 @@ class Recorder:
             clean.append({"t": round(t - float(pts[0]["t"]), 4), "pos": pos})
             prev_t = t
         mode = data.get("mode", "continuous")
-        if mode not in MODES:
+        if mode not in ("continuous", "keypoints", "track", "laps-raw"):
             mode = "continuous"
-        return self._save({"name": name or data.get("name") or "uploaded",
-                           "mode": mode, "points": clean}, overwrite=False)
+        out = {"name": name or data.get("name") or "uploaded", "mode": mode, "points": clean}
+        if mode == "track" and isinstance(data.get("lap_time"), (int, float)):
+            out["lap_time"] = float(data["lap_time"])
+        if mode == "laps-raw" and isinstance(data.get("markers"), list):
+            t0 = float(pts[0]["t"])
+            out["markers"] = [float(m) - t0 for m in data["markers"]
+                              if isinstance(m, (int, float))]
+        return self._save(out, overwrite=False)
 
     def _add(self, now: Optional[float] = None) -> None:
         now = self._clock() if now is None else now
@@ -205,8 +259,16 @@ class Recorder:
         if self.armed:
             return {"active": True, "armed": True, "mode": self.mode, "points": 0,
                     "elapsed": 0.0}
-        return {"active": True, "armed": False, "mode": self.mode,
-                "points": len(self.points), "elapsed": round(self._clock() - self._t0, 1)}
+        elapsed = self._clock() - self._t0
+        st = {"active": True, "armed": False, "mode": self.mode,
+              "points": len(self.points), "elapsed": round(elapsed, 1)}
+        if self.mode == "laps":
+            st["marks"] = len(self.markers)
+            st["laps"] = max(0, len(self.markers) - 1)
+            st["lap_elapsed"] = round(elapsed - self.markers[-1], 1) if self.markers else None
+            if len(self.markers) >= 2:
+                st["last_lap"] = round(self.markers[-1] - self.markers[-2], 2)
+        return st
 
     # ------------------------------------------------------------ library
     def _path(self, name: str) -> str:
@@ -249,7 +311,13 @@ class Recorder:
 
     @staticmethod
     def _summary(d: dict) -> dict:
-        return {"name": d["name"], "mode": d.get("mode", "continuous"),
+        extra = {}
+        if d.get("mode") == "track":
+            extra = {"lap_time": d.get("lap_time"), "laps": d.get("laps", []),
+                     "source": d.get("source")}
+        elif d.get("mode") == "laps-raw":
+            extra = {"marks": len(d.get("markers", []))}
+        return {"name": d["name"], "mode": d.get("mode", "continuous"), **extra,
                 "duration": d.get("duration", 0), "points": len(d.get("points", [])),
                 "axes": sorted(d["points"][0]["pos"]) if d.get("points") else [],
                 "created": d.get("created", 0)}

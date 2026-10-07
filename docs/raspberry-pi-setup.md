@@ -54,7 +54,8 @@ Pi RX (GPIO15) goes to SKR TX (GPIO0), and GND to GND.
 On the Pi (or any Linux/WSL machine):
 
 ```sh
-sudo apt install git python3-venv cmake gcc-arm-none-eabi libnewlib-arm-none-eabi \n                 build-essential libusb-1.0-0-dev pkg-config
+sudo apt install git python3-venv cmake gcc-arm-none-eabi libnewlib-arm-none-eabi \
+                 build-essential libusb-1.0-0-dev pkg-config
 cd firmware
 cmake -B build -DPICO_SDK_FETCH_FROM_GIT=ON
 cmake --build build -j4

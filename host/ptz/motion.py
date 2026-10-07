@@ -174,6 +174,9 @@ class MotionController:
         self.sys_flags = msg["sys_flags"]
         for ax, (pos, vel, flags) in zip(self.axes, P.status_axes(msg)):
             st = self.state[ax.name]
+            if (st.flags ^ flags) & P.ST_ENDSTOP and flags & P.ST_CONFIGURED:
+                log.info("endstop %s %s at %.2f", ax.name,
+                         "TRIGGERED" if flags & P.ST_ENDSTOP else "released", ax.to_units(pos))
             st.pos, st.vel, st.flags = pos, vel, flags
 
     def _on_event(self, msg: P.Message) -> None:

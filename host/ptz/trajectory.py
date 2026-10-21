@@ -302,6 +302,11 @@ class PlaybackTrajectory:
             return self.initial()
         return dict(self._last)
 
+    @property
+    def real_duration(self) -> float:
+        """Remaining-free estimate of the lap duration in seconds of real time."""
+        return self.duration / max(0.05, self._k)
+
     def initial(self) -> Dict[str, Tuple[float, float]]:
         """(position, velocity) at the start, at the initial speed factor."""
         # the spline's own start slope (calling it at the first point would
@@ -319,6 +324,8 @@ class BlendIn:
     """
 
     MIN_T, MAX_T = 0.3, 6.0
+    SHARE = 0.75          # fraction of the axis limits the fade may use
+    MAX_LAP_FRACTION = 0.3  # the fade never lasts more than this part of the lap
 
     def __init__(self, inner, start_pos: Dict[str, float], start_vel: Dict[str, float],
                  vmax: Dict[str, float], amax: Dict[str, float]):
@@ -328,16 +335,19 @@ class BlendIn:
         s0 = inner.initial()
         self.o0 = {n: start_pos.get(n, s0[n][0]) - s0[n][0] for n in self.axes}
         self.v0 = {n: start_vel.get(n, s0[n][1]) - s0[n][1] for n in self.axes}
-        T = self.MIN_T
+        T, k = self.MIN_T, self.SHARE
         for n in self.axes:
-            # The fade must use at most half of the axis limits (the lap uses
-            # the rest): its speed peaks at 1.5*|o|/T, its acceleration at
+            # Catch the new path quickly, within SHARE of the axis limits:
+            # the fade speed peaks at 1.5*|o|/T, its acceleration at
             # 6|o|/T^2 + 4|v|/T (Hermite curve, at the start).
             o, v = abs(self.o0[n]), abs(self.v0[n])
-            vm, am = max(vmax[n], 1e-9), max(amax[n], 1e-9)
-            T = max(T, 3.0 * o / vm,
-                    (4.0 * v + math.sqrt(16.0 * v * v + 12.0 * am * o)) / am)
-        self.T = min(T, self.MAX_T)
+            vm, am = max(vmax[n], 1e-9) * k, max(amax[n], 1e-9) * k
+            T = max(T, 1.5 * o / vm,
+                    (4.0 * v + math.sqrt(16.0 * v * v + 24.0 * am * o)) / (2.0 * am))
+        # never longer than a fraction of the lap: on a short lap the fade
+        # must end well before the lap does (otherwise the end snaps)
+        lap = getattr(inner, "real_duration", inner.duration)
+        self.T = max(self.MIN_T, min(T, self.MAX_T, self.MAX_LAP_FRACTION * lap))
         self.t = 0.0
 
     @property

@@ -137,3 +137,25 @@ def test_blend_in_starts_at_current_state_and_joins_the_path():
         assert abs(v - prev_v) / dt < 400                     # bounded acceleration
         prev_p, prev_v = p, v
     assert b.sample()["pan"] == lap.sample()["pan"]           # joined the lap exactly
+
+
+def test_blend_on_short_lap_reaches_new_path_well_before_the_end():
+    """Regression: on a short lap (5.5 s) a GO near the end used a 6 s fade,
+    so the head never joined the new lap and snapped at its end."""
+    pts = [{"t": t, "pos": {"pan": p}} for t, p in
+           [(0, 0), (1.5, 25), (3.0, 60), (4.5, 40), (5.55, 15)]]
+    vmax, amax = {"pan": 45.0}, {"pan": 50.0}
+    first = PlaybackTrajectory(pts, vmax, lambda: 1.0, natural_ends=True)
+    for _ in range(470):
+        first.advance(0.01)
+    p0, v0 = first.sample()["pan"]
+    lap = PlaybackTrajectory(pts, vmax, lambda: 1.0, natural_ends=True)
+    b = BlendIn(lap, {"pan": p0}, {"pan": v0}, vmax, amax)
+    assert b.T <= 0.3 * 5.55 + 1e-9
+    joined = None
+    while not b.done:
+        b.advance(0.01)
+        if joined is None and b.t >= b.T:
+            joined = b.t
+            assert abs(b.sample()["pan"][0] - lap.sample()["pan"][0]) < 1e-6
+    assert joined is not None and joined < 0.5 * 5.55

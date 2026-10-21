@@ -595,6 +595,8 @@ function gpPick(pads) {
 function gpAxis(pad, index, inv, deadband) {
   if (index == null || index < 0 || index >= pad.axes.length) return 0;
   let v = pad.axes[index] || 0;
+  if (!(Math.abs(v) <= 1.5)) return 0;              // invalid axis value: ignore
+  v = Math.max(-1, Math.min(1, v));
   if (inv) v = -v;
   if (deadband === undefined) return v;
   const a = Math.abs(v);
@@ -636,9 +638,14 @@ function pollController() {
     buildGpUi(pad, pads);
   }
   const m = gp.map;
+  if (gp.detect && !gp.baseline) gp.baseline = [...pad.axes];
   if (gp.detect) {                 // "detect": the axis that moves most gets assigned
     let best = -1, amount = 0.5;
-    pad.axes.forEach((v, i) => { const d = Math.abs(v - (gp.baseline[i] || 0)); if (d > amount) { amount = d; best = i; } });
+    pad.axes.forEach((v, i) => {
+      if (Math.abs(v) > 1.5 || Math.abs(gp.baseline[i] || 0) > 1.5) return;   // unused / invalid axis
+      const d = Math.abs(v - (gp.baseline[i] || 0));
+      if (d > amount) { amount = d; best = i; }
+    });
     if (best >= 0) {
       const key = gp.detect.replace("gp-", "");
       m[key] = best; gpSaveMap(); $(gp.detect).value = best;
@@ -719,10 +726,14 @@ function renderGpLive(pad, pads) {
   warn.textContent = w;
   warn.classList.toggle("hidden", !w);
   if (!pad) {
-    $("gp-info").textContent = gp.everSeen ? "Controller disconnected"
-      : "No controller detected yet: press a button or move the stick.";
+    $("gp-info").innerHTML = gp.everSeen ? "Controller disconnected."
+      : "<b>No controller visible yet.</b> Browsers only show a controller after a button "
+        + "press or a full stick movement on this page: press any button on it.";
     $("gp-live").innerHTML = "";
     return;
+  }
+  if (gp.detect) {
+    $("gp-info").innerHTML = `<b>Detect:</b> move the axis for "${gp.detect.replace("gp-", "")}" fully.`;
   }
   const m = gp.map;
   const role = { [m.pan]: "pan", [m.tilt]: "tilt", [m.zoom]: "zoom", [m.slider]: "slider" };
@@ -732,12 +743,13 @@ function renderGpLive(pad, pads) {
     info += m.sliderMode === "speed" ? ` - joystick speed ${Math.round(input.gpScale * 100)} %`
       : m.sliderMode === "zoom_pos" ? " - slider = zoom position" : " - slider = zoom rate";
   }
-  $("gp-info").textContent = info;
-  $("gp-live").innerHTML = pad.axes.map((v, i) => {
+  if (!gp.detect) $("gp-info").textContent = info;
+  $("gp-live").innerHTML = pad.axes.map((raw, i) => {
+    const bad = !(Math.abs(raw) <= 1.5), v = bad ? 0 : Math.max(-1, Math.min(1, raw));
     const left = v < 0 ? 50 + v * 50 : 50, width = Math.abs(v) * 50;
     return `<div class="gp-axisbar ${role[i] ? "used" : ""}"><span class="name">Axis ${i}${role[i] ? " · " + role[i] : ""}</span>
       <span class="bar"><span class="fill" style="left:${left}%;width:${width}%"></span></span>
-      <span class="num">${v.toFixed(2)}</span></div>`;
+      <span class="num">${bad ? "n/a" : v.toFixed(2)}</span></div>`;
   }).join("") + `<div style="grid-column:1/-1">${pad.buttons.map((b, i) =>
     `<span class="gp-btn ${b.pressed || b.value > 0.5 ? "on" : ""}" title="${escapeHtml((GP_ACTIONS.find(([v]) => v === (m.buttons[i] || "")) || ["", ""])[1])}">${i + 1}</span>`).join("")}</div>`;
 }
@@ -757,11 +769,11 @@ $("gp-deadband").onchange = () => {
 };
 document.querySelectorAll("[data-detect]").forEach((b) => {
   b.onclick = () => {
-    const pads = gpList(), pad = pads.find((p) => p.id === gp.id);
-    if (!pad) { showError("no controller"); return; }
-    gp.detect = b.dataset.detect; gp.baseline = [...pad.axes];
+    document.querySelectorAll("[data-detect]").forEach((o) => o.classList.remove("gp-detecting"));
+    const pad = gpList().find((p) => p.id === gp.id);
+    gp.detect = b.dataset.detect;
+    gp.baseline = pad ? [...pad.axes] : null;   // no pad yet: taken when it appears
     b.classList.add("gp-detecting");
-    $("gp-info").textContent = "Move the axis to assign…";
   };
 });
 $("gp-reset").onclick = () => {

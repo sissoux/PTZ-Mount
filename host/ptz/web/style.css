@@ -132,3 +132,25 @@ input[type=number] { background: #15171a; color: var(--text); border: 1px solid 
 #lap-table { margin-top: 10px; }
 #lap-table tr.unused td { color: var(--muted); }
 code { font-size: 12px; background: #15171a; padding: 1px 4px; border-radius: 3px; }
+
+/* ---- v0.5: controller panel ---- */
+.result-bad { color: var(--danger); font-size: 13px; margin-bottom: 8px; }
+.gp-live { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px;
+           margin-top: 10px; font-size: 12px; }
+.gp-axisbar { display: grid; grid-template-columns: 70px 1fr 44px; align-items: center; gap: 6px; }
+.gp-axisbar .bar { position: relative; height: 8px; background: #2b3038; border-radius: 4px; }
+.gp-axisbar .bar::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #555; }
+.gp-axisbar .fill { position: absolute; top: 0; bottom: 0; background: var(--accent); border-radius: 4px; }
+.gp-axisbar .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.gp-axisbar.used .name { color: var(--text); font-weight: 600; }
+.gp-btn { display: inline-block; min-width: 26px; padding: 2px 6px; margin: 2px; text-align: center;
+          border: 1px solid var(--line); border-radius: 4px; font-size: 11px; }
+.gp-btn.on { background: var(--ok); color: #fff; border-color: var(--ok); }
+.gp-map { margin-top: 8px; }
+.gp-map td { border: none; padding: 3px 4px; }
+.gp-buttons { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 12px;
+              margin-top: 10px; font-size: 12px; }
+.gp-buttons label { display: flex; gap: 6px; align-items: center; }
+.gp-buttons select { flex: 1; padding: 3px 4px; }
+details summary { cursor: pointer; color: var(--muted); margin-top: 10px; }
+.gp-detecting { border-color: var(--warn) !important; }

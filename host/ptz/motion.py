@@ -438,9 +438,13 @@ class MotionController:
         a = (1.0 - m.expo) * a + m.expo * a ** 3
         return math.copysign(a, v)
 
-    def jog(self, values: Dict[str, float]) -> List[str]:
+    def jog(self, values: Dict[str, float], scale=None) -> List[str]:
         """Normalized velocity command (-1..1) per axis. Must be refreshed
         by the caller at least every motion.jog_timeout seconds.
+
+        scale: optional speed factor (0..1), a number or {axis: factor},
+        applied after the deadband / expo curve (e.g. a controller's speed
+        slider: a slow setting must not fall into the deadband).
 
         A non-zero jog on an axis that is running a move or a replay takes
         over (manual override). Zero values never interrupt a move.
@@ -450,6 +454,13 @@ class MotionController:
         now = asyncio.get_running_loop().time()
         shaped = {n: self._shape(v) for n, v in values.items()
                   if n in self.state and n not in self._homing}
+        if scale is not None:
+            for n in shaped:
+                k = scale.get(n, 1.0) if isinstance(scale, dict) else scale
+                try:
+                    shaped[n] *= clamp(float(k), 0.0, 1.0)
+                except (TypeError, ValueError):
+                    pass
         refused = []
         if self.cfg.motion.require_homing:
             refused = [n for n, v in shaped.items() if v != 0.0 and not self.state[n].homed]

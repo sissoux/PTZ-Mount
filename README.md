@@ -110,6 +110,18 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
 
 * **Live control**: pad, zoom rocker, keyboard, gamepad, presets, and a
   large position readout per axis (unit label set by `units:` in each axis).
+* **Controller panel**: any gamepad or custom HID joystick seen by Windows.
+  The device you touch is used automatically, even if others are connected.
+  Axes and buttons are shown live and can be mapped, including a "detect"
+  helper for axes. The mapping is saved per device in the browser.
+  * Default for a custom controller: X/Y = pan/tilt, Z slider = joystick
+    speed, buttons 1-5 = presets 1-5, button 6 = Lap / GO.
+  * Lap / GO marks a lap while learning, and fires GO while a track is armed
+    or running.
+  * The slider can drive the joystick speed (5-100 %), the zoom position
+    (slider = zoom, follows until reached), or the zoom rate (centre = stop).
+  * Keep the page visible: browsers stop reading controllers in background
+    tabs.
 * **Homing first**: an axis that is not homed cannot move at all, whether
   by jog, move, preset or replay, from any source. Homing itself is always
   allowed. Releasing the motors or a board reboot clears the homing. Set

@@ -5,6 +5,7 @@ the reply so clients can match answers.
 
 Motion
     {"cmd": "jog", "pan": 0.5, "tilt": -0.2, "zoom": 0}     normalized -1..1
+    {"cmd": "jog", "pan": 1, "scale": {"pan": 0.2}}          speed factor after the curve
     {"cmd": "goto", "pan": 10, "tilt": 5, "speed": 0.5}      user units
     {"cmd": "move_rel", "pan": -2}
     {"cmd": "stop"}            {"cmd": "estop"}      {"cmd": "clear_estop"}
@@ -108,7 +109,7 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
     try:
         # ------------------------------------------------ motion
         if cmd == "jog":
-            refused = ctrl.jog(_axis_values(ctrl, msg))
+            refused = ctrl.jog(_axis_values(ctrl, msg), msg.get("scale"))
             if refused:
                 return _fail(cmd, f"{', '.join(refused)} not homed: home first", quiet=True)
         elif cmd == "goto":

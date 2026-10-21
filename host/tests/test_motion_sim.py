@@ -551,3 +551,23 @@ def test_go_during_lap_restarts_smoothly_and_auto_adjust(tmp_path, monkeypatch):
         ctrl._auto_adjust(3.0)                                # GO from another car
         assert ctrl.current_lap_time() == pytest.approx(17.5)
     run(t, tmp_path)
+
+
+def test_jog_scale_applies_after_deadband(tmp_path):
+    """A controller speed slider at 5 % must still move the axis slowly
+    (scaling before the deadband would zero it)."""
+    async def t(ctrl):
+        await ctrl.home(["pan"])
+        await ctrl.goto({"pan": 0}, wait=True)
+        r = await dispatch(ctrl, {"cmd": "jog", "pan": 0.8, "scale": {"pan": 0.05}})
+        assert r["ok"]
+        st = ctrl.state["pan"]
+        full = ctrl._shape(0.8)
+        assert st.jog_value == pytest.approx(full * 0.05)
+        assert st.jog_value > 0                                     # slow, but moving
+        await ctrl.stop()
+        ctrl.jog({"pan": 0.8}, scale=1.0)
+        assert ctrl.state["pan"].jog_value == pytest.approx(full)
+        ctrl.jog({"pan": 0.8}, scale="junk")                         # ignored, no crash
+        await ctrl.stop()
+    run(t, tmp_path)

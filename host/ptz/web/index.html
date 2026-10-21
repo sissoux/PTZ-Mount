@@ -115,6 +115,43 @@
       </div>
     </section>
 
+    <section class="card pad-card">
+      <h2>Controller (gamepad / joystick)</h2>
+      <div id="gp-warning" class="result-bad hidden"></div>
+      <div class="row" style="margin-top:0">
+        <select id="gp-select" title="Which controller drives the head"></select>
+        <span id="gp-info" class="muted"></span>
+      </div>
+      <div id="gp-live" class="gp-live"></div>
+      <details id="gp-mapping-box">
+        <summary>Mapping</summary>
+        <table class="gp-map"><tbody>
+          <tr><td>Pan</td><td><select id="gp-pan" class="gp-axis"></select></td>
+            <td><label><input id="gp-pan-inv" type="checkbox"> invert</label></td>
+            <td><button class="small" data-detect="gp-pan">detect</button></td></tr>
+          <tr><td>Tilt</td><td><select id="gp-tilt" class="gp-axis"></select></td>
+            <td><label><input id="gp-tilt-inv" type="checkbox"> invert</label></td>
+            <td><button class="small" data-detect="gp-tilt">detect</button></td></tr>
+          <tr><td>Zoom stick</td><td><select id="gp-zoom" class="gp-axis"></select></td>
+            <td><label><input id="gp-zoom-inv" type="checkbox"> invert</label></td>
+            <td><button class="small" data-detect="gp-zoom">detect</button></td></tr>
+          <tr><td>Slider</td><td><select id="gp-slider" class="gp-axis"></select></td>
+            <td><label><input id="gp-slider-inv" type="checkbox"> invert</label></td>
+            <td><button class="small" data-detect="gp-slider">detect</button></td></tr>
+          <tr><td>Slider controls</td><td colspan="3"><select id="gp-slider-mode">
+            <option value="speed">Joystick speed</option>
+            <option value="zoom_pos">Zoom position (slider = zoom)</option>
+            <option value="zoom_rate">Zoom rate (centre = stop)</option>
+          </select></td></tr>
+          <tr><td>Deadband</td><td colspan="3"><input id="gp-deadband" type="number" min="0" max="0.5" step="0.01" class="short"></td></tr>
+        </tbody></table>
+        <div id="gp-buttons" class="gp-buttons"></div>
+        <div class="row"><button id="gp-reset" class="small">Reset mapping to defaults</button></div>
+      </details>
+      <p class="hint">Press a button or move the stick once after loading the page so the
+        browser exposes the controller. The page must stay visible (not minimized).</p>
+    </section>
+
     <section class="card race">
       <h2>Race tracking</h2>
       <h3>1 · Learn the lap</h3>

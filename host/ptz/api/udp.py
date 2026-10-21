@@ -52,7 +52,8 @@ class UdpServer(asyncio.DatagramProtocol):
         self.ctrl.note_source("udp", addr[0])
         if isinstance(msg, dict) and msg.get("cmd") == "jog":
             if self.ctrl.may_control(None):          # blocking mode: web owner only
-                self.ctrl.jog({k: v for k, v in msg.items() if k in self.ctrl.state})
+                self.ctrl.jog({k: v for k, v in msg.items() if k in self.ctrl.state},
+                              msg.get("scale"))
             return                                   # hot path: no task, no reply
         if isinstance(msg, dict) and msg.get("cmd") == "subscribe":
             self.subscribers[addr] = time.monotonic() + SUBSCRIPTION_TTL

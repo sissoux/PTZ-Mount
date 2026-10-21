@@ -5,7 +5,6 @@
 
 const JOG_HZ = 25;
 const NUM_PRESETS = 12;
-const GAMEPAD_DEADBAND = 0.12;      // ignore stick drift
 const MAX_LOG = 1500;
 let ws = null, config = null, presets = {}, status = null, recordings = [];
 let logEntries = [], myId = null, clients = [];
@@ -535,26 +534,265 @@ document.addEventListener("keyup", (e) => {
   if (e.code === "Space" && e.target.tagName === "BUTTON") e.preventDefault();
 });
 
-// ------------------------------------------------------------ gamepad (browser Gamepad API)
-function pollGamepad() {
-  const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find((g) => g);
-  if (!gp) { input.gp = { x: 0, y: 0, z: 0 }; return; }
-  const ax = (i) => { const v = gp.axes[i] || 0; return Math.abs(v) < GAMEPAD_DEADBAND ? 0 : v; };
-  // Left stick = pan/tilt, right stick vertical = zoom (standard mapping)
-  input.gp = { x: ax(0), y: -ax(1), z: -ax(3) };
+// ------------------------------------------------------------ controller (browser Gamepad API)
+// Works with any gamepad / HID joystick seen by the OS. The pad that moved
+// last is used ("auto"), so other devices listed by Windows (virtual
+// joysticks, headsets...) do not hide it. Mapping is stored per device in
+// this browser. Button numbers are shown 1-based like Windows' joy.cpl.
+const GP_ACTIONS = [["", "-"], ["lapgo", "Lap / GO (race)"], ["lap", "Lap mark"], ["go", "GO"],
+  ["arm", "ARM track"], ["stop", "Stop"], ["estop", "E-STOP"], ["home", "Home all"],
+  ["rec", "Record start / stop"]]
+  .concat(Array.from({ length: NUM_PRESETS }, (_, i) => [`preset:${i + 1}`, `Preset ${i + 1}`]));
+const gp = { id: null, map: null, prevAxes: {}, prevButtons: [], activity: {}, detect: null,
+             baseline: null, sliderLast: null, zoomFollow: false, error: "", tick: 0, everSeen: false };
+input.gpScale = 1;
+
+function gpDefaults(pad) {
+  const std = pad.mapping === "standard";
+  const buttons = {};
+  if (!std) {                       // custom controller: 1..5 = presets, 6 = Lap / GO
+    for (let i = 0; i < Math.min(5, pad.buttons.length); i++) buttons[i] = `preset:${i + 1}`;
+    if (pad.buttons.length > 5) buttons[5] = "lapgo";
+  }
+  return { pan: 0, panInv: false, tilt: 1, tiltInv: true,
+           zoom: std && pad.axes.length > 3 ? 3 : -1, zoomInv: true,
+           slider: !std && pad.axes.length > 2 ? 2 : -1, sliderInv: false, sliderMode: "speed",
+           deadband: 0.08, buttons };
 }
+function gpLoadMap(pad) {
+  try {
+    const m = JSON.parse(localStorage.getItem(`ptz-gp:${pad.id}`));
+    if (m) return { ...gpDefaults(pad), ...m };
+  } catch (e) { /* defaults */ }
+  return gpDefaults(pad);
+}
+function gpSaveMap() { try { localStorage.setItem(`ptz-gp:${gp.id}`, JSON.stringify(gp.map)); } catch (e) { /* */ } }
+function gpChoice() { try { return localStorage.getItem("ptz-gp-choice") || "auto"; } catch (e) { return "auto"; } }
+
+function gpList() {
+  try {
+    gp.error = "";
+    return [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean);
+  } catch (e) {                    // older Chrome: blocked on http:// LAN pages
+    gp.error = `${e.name}: ${e.message}`;
+    return [];
+  }
+}
+
+function gpPick(pads) {
+  const now = performance.now();
+  for (const p of pads) {         // remember which device the operator touches
+    const prev = gp.prevAxes[p.index];
+    const moved = prev && p.axes.some((v, i) => Math.abs(v - (prev[i] || 0)) > 0.15);
+    if (moved || p.buttons.some((b) => b.pressed)) gp.activity[p.id] = now;
+    gp.prevAxes[p.index] = [...p.axes];
+  }
+  const choice = gpChoice();
+  if (choice !== "auto") return pads.find((p) => p.id === choice) || null;
+  return pads.slice().sort((a, b) => (gp.activity[b.id] || 0) - (gp.activity[a.id] || 0))[0] || null;
+}
+
+function gpAxis(pad, index, inv, deadband) {
+  if (index == null || index < 0 || index >= pad.axes.length) return 0;
+  let v = pad.axes[index] || 0;
+  if (inv) v = -v;
+  if (deadband === undefined) return v;
+  const a = Math.abs(v);
+  return a <= deadband ? 0 : Math.sign(v) * (a - deadband) / (1 - deadband);
+}
+
+function gpAction(a) {
+  if (!a) return;
+  if (a.startsWith("preset:")) { send({ cmd: "preset_recall", preset: parseInt(a.slice(7), 10), id: "gp" }); return; }
+  const tr = status && status.tracking;
+  switch (a) {
+    case "lapgo":                 // same button for learning and live tracking
+      if (learning()) lapMark();
+      else if (tr && goAllowed(tr.phase)) send({ cmd: "track_go", id: "go" });
+      else showError("Lap / GO button: start learning or ARM a track first");
+      break;
+    case "lap": lapMark(); break;
+    case "go": send({ cmd: "track_go", id: "go" }); break;
+    case "arm": $("btn-arm").click(); break;
+    case "stop": send({ cmd: "stop", id: "st" }); break;
+    case "estop": send({ cmd: "estop", id: "es" }); break;
+    case "home": send({ cmd: "home", id: "ho" }); break;
+    case "rec": $("btn-rec").click(); break;
+  }
+}
+
+function pollController() {
+  const pads = gpList();
+  const pad = gpPick(pads);
+  if (pads.length) gp.everSeen = true;
+  if (!pad) {
+    input.gp = { x: 0, y: 0, z: 0 }; input.gpScale = 1;
+    if (gp.id !== null) { gp.id = null; buildGpUi(null, pads); }
+    if (gp.tick++ % 5 === 0) renderGpLive(null, pads);
+    return;
+  }
+  if (pad.id !== gp.id) {         // new device: load its mapping, rebuild the panel
+    gp.id = pad.id; gp.map = gpLoadMap(pad); gp.prevButtons = []; gp.sliderLast = null;
+    buildGpUi(pad, pads);
+  }
+  const m = gp.map;
+  if (gp.detect) {                 // "detect": the axis that moves most gets assigned
+    let best = -1, amount = 0.5;
+    pad.axes.forEach((v, i) => { const d = Math.abs(v - (gp.baseline[i] || 0)); if (d > amount) { amount = d; best = i; } });
+    if (best >= 0) {
+      const key = gp.detect.replace("gp-", "");
+      m[key] = best; gpSaveMap(); $(gp.detect).value = best;
+      document.querySelector(`[data-detect="${gp.detect}"]`).classList.remove("gp-detecting");
+      gp.detect = null;
+    }
+  }
+  let x = gpAxis(pad, m.pan, m.panInv, m.deadband);
+  let y = gpAxis(pad, m.tilt, m.tiltInv, m.deadband);
+  let z = gpAxis(pad, m.zoom, m.zoomInv, m.deadband);
+  let scale = 1;
+  if (m.slider >= 0 && m.slider < pad.axes.length) {
+    const t = (gpAxis(pad, m.slider, m.sliderInv) + 1) / 2;          // 0..1
+    if (m.sliderMode === "speed") {
+      scale = 0.05 + 0.95 * t;
+    } else if (m.sliderMode === "zoom_rate") {
+      const r = 2 * t - 1;
+      z = Math.abs(r) < 0.1 ? z : (Math.abs(r) > Math.abs(z) ? r : z);
+    } else if (m.sliderMode === "zoom_pos" && config && status) {
+      const zc = axisCfg("zoom"), zs = status.axes.zoom;
+      if (zc && zs && zs.homed) {
+        const range = zc.max - zc.min, target = zc.min + t * range;
+        if (gp.sliderLast === null || Math.abs(t - gp.sliderLast) > 0.004) gp.zoomFollow = true;
+        gp.sliderLast = t;
+        const err = target - zs.pos;
+        if (gp.zoomFollow && Math.abs(err) < 0.004 * range) gp.zoomFollow = false;
+        if (gp.zoomFollow) {        // follow the slider; stops once reached
+          const f = Math.max(-1, Math.min(1, err / (0.08 * range)));
+          z = Math.abs(f) > Math.abs(z) ? f : z;
+        }
+      }
+    }
+  }
+  input.gpScale = scale;              // applied on the Pi, after the deadband
+  input.gp = { x, y, z };
+  pad.buttons.forEach((b, i) => {  // actions on press (rising edge)
+    const on = b.pressed || b.value > 0.5;
+    if (on && !gp.prevButtons[i]) gpAction(m.buttons[i]);
+    gp.prevButtons[i] = on;
+  });
+  if (gp.tick++ % 3 === 0) renderGpLive(pad, pads);
+}
+
+function buildGpUi(pad, pads) {
+  const sel = $("gp-select"), choice = gpChoice();
+  sel.innerHTML = `<option value="auto">Auto (the one you touch)</option>`
+    + pads.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.id)}</option>`).join("");
+  sel.value = pads.some((p) => p.id === choice) ? choice : "auto";
+  const axisOpts = (n) => `<option value="-1">-</option>`
+    + Array.from({ length: n }, (_, i) => `<option value="${i}">Axis ${i}</option>`).join("");
+  for (const k of ["pan", "tilt", "zoom", "slider"]) {
+    $(`gp-${k}`).innerHTML = axisOpts(pad ? pad.axes.length : 0);
+    if (pad) { $(`gp-${k}`).value = gp.map[k]; $(`gp-${k}-inv`).checked = !!gp.map[`${k}Inv`]; }
+  }
+  if (!pad) { $("gp-buttons").innerHTML = ""; return; }
+  $("gp-slider-mode").value = gp.map.sliderMode;
+  $("gp-deadband").value = gp.map.deadband;
+  const opts = GP_ACTIONS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
+  $("gp-buttons").innerHTML = pad.buttons.map((_, i) =>
+    `<label>Button ${i + 1}<select data-btn="${i}">${opts}</select></label>`).join("");
+  document.querySelectorAll("#gp-buttons select").forEach((s) => {
+    s.value = gp.map.buttons[s.dataset.btn] || "";
+    s.onchange = () => { gp.map.buttons[s.dataset.btn] = s.value; gpSaveMap(); };
+  });
+}
+
+function renderGpLive(pad, pads) {
+  const warn = $("gp-warning");
+  let w = "";
+  if (gp.error) {
+    w = `This browser blocks game controllers on this page (${gp.error}). Use a current Chrome / Edge, `
+      + `or allow it: chrome://flags/#unsafely-treat-insecure-origin-as-secure → add ${location.origin}`;
+  } else if (!navigator.getGamepads) {
+    w = "This browser has no Gamepad API.";
+  } else if (document.hidden) {
+    w = "The page is hidden: browsers stop reading controllers in background tabs.";
+  }
+  warn.textContent = w;
+  warn.classList.toggle("hidden", !w);
+  if (!pad) {
+    $("gp-info").textContent = gp.everSeen ? "Controller disconnected"
+      : "No controller detected yet: press a button or move the stick.";
+    $("gp-live").innerHTML = "";
+    return;
+  }
+  const m = gp.map;
+  const role = { [m.pan]: "pan", [m.tilt]: "tilt", [m.zoom]: "zoom", [m.slider]: "slider" };
+  let info = `${pads.length} device(s) - using "${pad.id}" (${pad.mapping || "generic"} mapping, `
+    + `${pad.axes.length} axes, ${pad.buttons.length} buttons)`;
+  if (m.slider >= 0) {
+    info += m.sliderMode === "speed" ? ` - joystick speed ${Math.round(input.gpScale * 100)} %`
+      : m.sliderMode === "zoom_pos" ? " - slider = zoom position" : " - slider = zoom rate";
+  }
+  $("gp-info").textContent = info;
+  $("gp-live").innerHTML = pad.axes.map((v, i) => {
+    const left = v < 0 ? 50 + v * 50 : 50, width = Math.abs(v) * 50;
+    return `<div class="gp-axisbar ${role[i] ? "used" : ""}"><span class="name">Axis ${i}${role[i] ? " · " + role[i] : ""}</span>
+      <span class="bar"><span class="fill" style="left:${left}%;width:${width}%"></span></span>
+      <span class="num">${v.toFixed(2)}</span></div>`;
+  }).join("") + `<div style="grid-column:1/-1">${pad.buttons.map((b, i) =>
+    `<span class="gp-btn ${b.pressed || b.value > 0.5 ? "on" : ""}" title="${escapeHtml((GP_ACTIONS.find(([v]) => v === (m.buttons[i] || "")) || ["", ""])[1])}">${i + 1}</span>`).join("")}</div>`;
+}
+
+$("gp-select").onchange = () => {
+  try { localStorage.setItem("ptz-gp-choice", $("gp-select").value); } catch (e) { /* */ }
+  gp.id = null;                    // rebuild on next poll
+};
+for (const k of ["pan", "tilt", "zoom", "slider"]) {
+  $(`gp-${k}`).onchange = () => { if (gp.map) { gp.map[k] = parseInt($(`gp-${k}`).value, 10); gpSaveMap(); } };
+  $(`gp-${k}-inv`).onchange = () => { if (gp.map) { gp.map[`${k}Inv`] = $(`gp-${k}-inv`).checked; gpSaveMap(); } };
+}
+$("gp-slider-mode").onchange = () => { if (gp.map) { gp.map.sliderMode = $("gp-slider-mode").value; gp.sliderLast = null; gpSaveMap(); } };
+$("gp-deadband").onchange = () => {
+  const v = parseFloat($("gp-deadband").value);
+  if (gp.map && !isNaN(v)) { gp.map.deadband = Math.max(0, Math.min(0.5, v)); gpSaveMap(); }
+};
+document.querySelectorAll("[data-detect]").forEach((b) => {
+  b.onclick = () => {
+    const pads = gpList(), pad = pads.find((p) => p.id === gp.id);
+    if (!pad) { showError("no controller"); return; }
+    gp.detect = b.dataset.detect; gp.baseline = [...pad.axes];
+    b.classList.add("gp-detecting");
+    $("gp-info").textContent = "Move the axis to assign…";
+  };
+});
+$("gp-reset").onclick = () => {
+  const pad = gpList().find((p) => p.id === gp.id);
+  if (!pad) return;
+  try { localStorage.removeItem(`ptz-gp:${pad.id}`); } catch (e) { /* */ }
+  gp.id = null;
+};
+window.addEventListener("gamepadconnected", (e) => console.log("gamepad connected:", e.gamepad.id));
+buildGpUi(null, []);
 
 // ------------------------------------------------------------ jog loop
 let wasActive = false;
 setInterval(() => {
-  pollGamepad();
+  pollController();
   if (lockedOut()) { wasActive = false; return; }     // someone else has control
   const pick = (...v) => v.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a), 0);
   const pan = pick(input.pad.x, input.keys.x, input.gp.x);
   const tilt = pick(input.pad.y, input.keys.y, input.gp.y);
   const z = pick(input.zoom, input.keys.z, input.gp.z);
   const active = Math.abs(pan) > 0.01 || Math.abs(tilt) > 0.01 || Math.abs(z) > 0.01;
-  if (active || wasActive) send({ cmd: "jog", pan, tilt, zoom: z });  // last frame sends zeros
+  if (active || wasActive) {               // last frame sends zeros
+    const msg = { cmd: "jog", pan, tilt, zoom: z };
+    if (input.gpScale < 1) {               // controller speed slider: only where it drives
+      const scale = {};
+      if (pan && pan === input.gp.x) scale.pan = input.gpScale;
+      if (tilt && tilt === input.gp.y) scale.tilt = input.gpScale;
+      if (Object.keys(scale).length) msg.scale = scale;
+    }
+    send(msg);
+  }
   wasActive = active;
 }, 1000 / JOG_HZ);
 

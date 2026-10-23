@@ -19,6 +19,7 @@ velocity mode instead of executing a pre-planned move queue like Klipper. See
 config/ptz.cfg          <- THE file to edit: pins, gearing, limits, speeds, currents
 docs/
   architecture.md       design, latency budget, safety layers, roadmap
+  api.md                control API for scripts (WebSocket, UDP, REST, VISCA)
   protocol.md           binary host <-> MCU protocol
   raspberry-pi-setup.md UART setup, firmware flashing, service install
 firmware/               RP2040 firmware (C, Pico SDK)
@@ -158,6 +159,12 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
 * **Debug mode** (top right): verbose logging and a live console showing
   every command with its source, rejections, MCU events and endstop changes,
   plus a driver diagnostics button.
+
+**Driving the mount from a program** (for example a live-event script): see
+[docs/api.md](docs/api.md) for the complete API reference (WebSocket, UDP,
+REST, VISCA), the Python client
+[clients/ptz_client.py](clients/ptz_client.py) and the example script
+[clients/live_script_example.py](clients/live_script_example.py).
 
 All of them share the same command set, documented in
 [host/ptz/api/commands.py](host/ptz/api/commands.py). Example:

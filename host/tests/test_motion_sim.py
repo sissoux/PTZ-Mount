@@ -606,3 +606,25 @@ def test_inactive_axis_is_left_out_and_can_be_switched_on(tmp_path):
         await asyncio.sleep(0.1)
         assert not ctrl.status()["axes"]["zoom"]["enabled"]
     run(t, tmp_path, text)
+
+
+def test_wait_option_replies_when_motion_is_finished(tmp_path):
+    async def t(ctrl):
+        r = await dispatch(ctrl, {"cmd": "home", "axes": ["pan"], "wait": True})
+        assert r["ok"] and ctrl.state["pan"].homed and not ctrl._homing
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        r = await dispatch(ctrl, {"cmd": "goto", "pan": 120, "wait": True})
+        assert r["ok"] and loop.time() - t0 > 0.2                       # waited for the move
+        assert ctrl.position("pan") == pytest.approx(120, abs=0.1)
+        ctrl.save_preset(4)
+        await ctrl.goto({"pan": 0}, wait=True)
+        r = await dispatch(ctrl, {"cmd": "preset_recall", "preset": 4, "wait": True})
+        assert r["ok"] and ctrl.position("pan") == pytest.approx(120, abs=0.1)
+        # interrupted while waiting -> error reply
+        task = asyncio.create_task(dispatch(ctrl, {"cmd": "goto", "pan": -150, "wait": True}))
+        await asyncio.sleep(0.1)
+        await dispatch(ctrl, {"cmd": "stop"})
+        r = await task
+        assert not r["ok"] and "interrupted" in r["error"]
+    run(t, tmp_path)

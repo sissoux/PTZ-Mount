@@ -650,6 +650,7 @@ class MotionController:
                 fut.set_result(False)
             else:
                 fut.set_exception(MotionError("move interrupted"))
+                fut.exception()     # its awaiter (if any) still gets it; no log noise
 
     def _current_state(self, axes: Iterable[str]) -> Tuple[Dict[str, float], Dict[str, float]]:
         """Where the head is going right now: the streamed set point and

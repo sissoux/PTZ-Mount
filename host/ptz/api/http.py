@@ -264,6 +264,17 @@ class HttpServer:
         return web.json_response({"ok": True, "recording": summary})
 
     # ------------------------------------------------------------ WebSocket
+    async def _ws_wait(self, ws, me, msg: dict) -> None:
+        try:
+            reply = await dispatch(self.ctrl, msg, source=me.label, client=me.id,
+                                   local=me.ip in LOCAL_ADDRESSES)
+        except Exception as e:  # noqa: BLE001
+            reply = {"ok": False, "error": str(e)}
+        reply.update(type="reply", id=msg.get("id"), cmd=msg.get("cmd"))
+        await self._send_quiet(ws, json.dumps(reply))
+        if "presets" in reply:
+            await self.broadcast({"type": "presets", "presets": reply["presets"]})
+
     async def _ws(self, request):
         ws = web.WebSocketResponse(heartbeat=5.0)
         await ws.prepare(request)
@@ -300,6 +311,11 @@ class HttpServer:
                     continue
                 if msg.get("cmd") == "jog":
                     jogging.update(k for k in msg if k in self.ctrl.state)
+                if msg.get("wait"):
+                    # long request: handled aside so stop / estop / jog sent
+                    # meanwhile on this socket are not queued behind it
+                    asyncio.get_running_loop().create_task(self._ws_wait(ws, me, msg))
+                    continue
                 reply = await dispatch(self.ctrl, msg, source=me.label, client=me.id,
                                        local=me.ip in LOCAL_ADDRESSES)
                 send_reply = "id" in msg or not reply["ok"]

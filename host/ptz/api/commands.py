@@ -7,6 +7,8 @@ Motion
     {"cmd": "jog", "pan": 0.5, "tilt": -0.2, "zoom": 0}     normalized -1..1
     {"cmd": "jog", "pan": 1, "scale": {"pan": 0.2}}          speed factor after the curve
     {"cmd": "goto", "pan": 10, "tilt": 5, "speed": 0.5}      user units
+    "wait": true on goto / move_rel / home / preset_recall / play / track_arm:
+    the reply comes when the motion is finished (or failed). See docs/api.md.
     {"cmd": "move_rel", "pan": -2}
     {"cmd": "stop"}            {"cmd": "estop"}      {"cmd": "clear_estop"}
     {"cmd": "home", "axes": ["pan", "tilt"]}  (omitted: axes with home_with_all)
@@ -85,6 +87,15 @@ def _background(ctrl: MotionController, coro) -> None:
     asyncio.get_running_loop().create_task(runner())
 
 
+async def _until(condition, timeout: float) -> None:
+    loop = asyncio.get_running_loop()
+    end = loop.time() + float(timeout)
+    while not condition():
+        if loop.time() > end:
+            raise MotionError("timeout while waiting")
+        await asyncio.sleep(0.05)
+
+
 def _describe(msg: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in msg.items() if k not in ("cmd", "id"))
 
@@ -107,6 +118,7 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             _last_jog_log[0] = now
             log.debug("%sjog %s", tag, _describe(msg))
     reply: Dict[str, Any] = {"ok": True}
+    wait = bool(msg.get("wait", False))     # reply only once the motion is finished
     try:
         # ------------------------------------------------ motion
         if cmd == "jog":
@@ -114,10 +126,11 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             if refused:
                 return _fail(cmd, f"{', '.join(refused)} not homed: home first", quiet=True)
         elif cmd == "goto":
-            await ctrl.goto(_axis_values(ctrl, msg), speed=float(msg.get("speed", 1.0)))
+            await ctrl.goto(_axis_values(ctrl, msg), speed=float(msg.get("speed", 1.0)),
+                            wait=wait)
         elif cmd == "move_rel":
             await ctrl.move_relative(_axis_values(ctrl, msg),
-                                     speed=float(msg.get("speed", 1.0)))
+                                     speed=float(msg.get("speed", 1.0)), wait=wait)
         elif cmd == "stop":
             await ctrl.stop(msg.get("axes"))
         elif cmd == "estop":
@@ -126,7 +139,10 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             await ctrl.clear_estop()
         elif cmd == "home":
             ctrl._check_ready()
-            _background(ctrl, ctrl.home(msg.get("axes")))
+            if wait:
+                await ctrl.home(msg.get("axes"))
+            else:
+                _background(ctrl, ctrl.home(msg.get("axes")))
         elif cmd == "enable":
             await ctrl.enable(bool(msg.get("on", True)), msg.get("axes"))
         elif cmd == "axis_active":
@@ -148,7 +164,8 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             ctrl.save_preset(msg["preset"], msg.get("name", ""))
             reply["presets"] = ctrl.presets.all()
         elif cmd == "preset_recall":
-            await ctrl.recall_preset(msg["preset"], speed=float(msg.get("speed", 1.0)))
+            await ctrl.recall_preset(msg["preset"], speed=float(msg.get("speed", 1.0)),
+                                     wait=wait)
         elif cmd == "preset_delete":
             ctrl.presets.delete(msg["preset"])
             reply["presets"] = ctrl.presets.all()
@@ -175,6 +192,8 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             reply["recordings"] = ctrl.recorder.list()
         elif cmd == "play":
             await ctrl.play(msg["name"], speed=msg.get("speed"), loop=msg.get("loop"))
+            if wait:                       # until the replay ends (not with loop)
+                await _until(lambda: ctrl.playback is None, msg.get("timeout", 3600))
         elif cmd == "play_set":
             ctrl.set_play(speed=msg.get("speed"), loop=msg.get("loop"))
         elif cmd == "play_stop":
@@ -188,6 +207,11 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             reply["recordings"] = ctrl.recorder.list()
         elif cmd == "track_arm":
             await ctrl.track_arm(msg["name"])
+            if wait:                       # until the head waits at the start point
+                await _until(lambda: ctrl.tracking["phase"] in ("armed", "idle"),
+                             msg.get("timeout", 120))
+                if ctrl.tracking["phase"] != "armed":
+                    raise MotionError("tracking was stopped before being armed")
         elif cmd == "track_go":
             ctrl.track_go()
         elif cmd == "track_set":

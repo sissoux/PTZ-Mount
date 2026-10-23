@@ -26,182 +26,187 @@
   <div id="lock-banner" class="lock-banner hidden"></div>
   <div id="config-banner" class="lock-banner hidden"></div>
 
-  <main>
-    <section class="card control">
-      <div id="readout" class="readout"></div>
-      <div id="pad" class="pad"><div id="knob" class="knob"></div></div>
-      <div class="zoom">
-        <label>Zoom</label>
-        <label class="axis-toggle" title="Zoom drive fitted? Off: unpowered, left out of Home all, presets and replays">
-          <input id="zoom-active" type="checkbox"> on</label>
-        <input id="zoom" type="range" min="-1" max="1" step="0.01" value="0">
-      </div>
-      <div class="motion-settings">
-        <div id="simple-sliders" class="sliders">
-          <label for="speed">Speed</label>
-          <input id="speed" type="range" min="0" max="1" step="any">
-          <span id="speed-val" class="val"></span>
-          <label for="accel">Acceleration</label>
-          <input id="accel" type="range" min="0" max="1" step="any">
-          <span id="accel-val" class="val"></span>
+  <main class="layout">
+    <div class="col col-left">
+      <section class="card control">
+        <div id="readout" class="readout"></div>
+        <div id="pad" class="pad"><div id="knob" class="knob"></div></div>
+        <div class="zoom">
+          <label>Zoom</label>
+          <label class="axis-toggle" title="Zoom drive fitted? Off: unpowered, left out of Home all, presets and replays">
+            <input id="zoom-active" type="checkbox"> on</label>
+          <input id="zoom" type="range" min="-1" max="1" step="0.01" value="0">
         </div>
-        <table id="axis-sliders" class="axis-sliders hidden"><tbody></tbody></table>
-        <div class="sliders">
-          <label for="smoothing">Ease in/out</label>
-          <input id="smoothing" type="range" min="0" max="1" step="0.05" value="0.3">
-          <span id="smoothing-val" class="val"></span>
+        <div class="motion-settings">
+          <div id="simple-sliders" class="sliders">
+            <label for="speed">Speed</label>
+            <input id="speed" type="range" min="0" max="1" step="any">
+            <span id="speed-val" class="val"></span>
+            <label for="accel">Acceleration</label>
+            <input id="accel" type="range" min="0" max="1" step="any">
+            <span id="accel-val" class="val"></span>
+          </div>
+          <table id="axis-sliders" class="axis-sliders hidden"><tbody></tbody></table>
+          <div class="sliders">
+            <label for="smoothing">Ease in/out</label>
+            <input id="smoothing" type="range" min="0" max="1" step="0.05" value="0.3">
+            <span id="smoothing-val" class="val"></span>
+          </div>
+          <label class="adv"><input id="advanced" type="checkbox"> Advanced: separate speed and acceleration per axis</label>
         </div>
-        <label class="adv"><input id="advanced" type="checkbox"> Advanced: separate speed and acceleration per axis</label>
-      </div>
-      <p class="hint">Keyboard: arrows = pan/tilt (Shift = slow), PgUp/PgDn = zoom,
-        Space = stop, Esc = E-stop. A gamepad plugged into this computer also works.</p>
-    </section>
+        <p class="hint">Keyboard: arrows = pan/tilt (Shift = slow), PgUp/PgDn = zoom,
+          Space = stop, Esc = E-stop. A gamepad plugged into this computer also works.</p>
+      </section>
 
-    <section class="card">
-      <h2>Axes</h2>
-      <table id="axes"><thead>
-        <tr><th title="Axis in use">On</th><th>Axis</th><th>Position</th><th>Velocity</th><th>State</th><th>Go to</th><th></th></tr>
-      </thead><tbody></tbody></table>
-      <div class="row buttons">
-        <button id="btn-home">Home all</button>
-        <button id="btn-goto">Go to</button>
-        <button id="btn-stop">Stop</button>
-        <button id="btn-enable">Motors on</button>
-        <button id="btn-disable">Motors off</button>
-      </div>
-    </section>
+      <section class="card presets-card">
+        <h2>Presets</h2>
+        <div class="row">
+          <label><input id="save-mode" type="checkbox"> Save mode (click a preset to store current position)</label>
+        </div>
+        <div id="presets" class="presets"></div>
+      </section>
+    </div>
+    <div class="col col-mid">
+      <section class="card axes-card">
+        <h2>Axes</h2>
+        <table id="axes"><thead>
+          <tr><th title="Axis in use">On</th><th>Axis</th><th>Position</th><th>Velocity</th><th>State</th><th>Go to</th><th></th></tr>
+        </thead><tbody></tbody></table>
+        <div class="row buttons">
+          <button id="btn-home">Home all</button>
+          <button id="btn-goto">Go to</button>
+          <button id="btn-stop">Stop</button>
+          <button id="btn-enable">Motors on</button>
+          <button id="btn-disable">Motors off</button>
+        </div>
+      </section>
 
-    <section class="card">
-      <h2>Presets</h2>
-      <div class="row">
-        <label><input id="save-mode" type="checkbox"> Save mode (click a preset to store current position)</label>
-      </div>
-      <div id="presets" class="presets"></div>
-    </section>
 
-    <section class="card recorder">
-      <h2>Record &amp; replay</h2>
-      <div class="row">
-        <select id="rec-mode" title="Continuous: the whole path is recorded. Keypoints: only the points you add, replayed smoothly.">
-          <option value="continuous">Continuous path</option>
-          <option value="keypoints">Keypoints</option>
-        </select>
-        <input id="rec-name" type="text" placeholder="name (optional)">
-      </div>
-      <div class="row">
-        <label title="The clock starts when the head starts to move, and the motionless end is trimmed">
-          <input id="rec-on-move" type="checkbox" checked> Start when moving (trims idle end)</label>
-      </div>
-      <div class="row">
-        <button id="btn-rec" class="rec-btn">● Record</button>
-        <button id="btn-keypoint" disabled>+ Keypoint</button>
-        <button id="btn-rec-cancel" class="hidden">Cancel</button>
-      </div>
-      <div id="rec-status" class="muted"></div>
+      <section class="card pad-card">
+        <h2>Controller (gamepad / joystick)</h2>
+        <div id="gp-warning" class="result-bad hidden"></div>
+        <div class="row" style="margin-top:0">
+          <select id="gp-select" title="Which controller drives the head"></select>
+          <span id="gp-info" class="muted"></span>
+        </div>
+        <div id="gp-live" class="gp-live"></div>
+        <details id="gp-mapping-box">
+          <summary>Mapping</summary>
+          <table class="gp-map"><tbody>
+            <tr><td>Pan</td><td><select id="gp-pan" class="gp-axis"></select></td>
+              <td><label><input id="gp-pan-inv" type="checkbox"> invert</label></td>
+              <td><button class="small" data-detect="gp-pan">detect</button></td></tr>
+            <tr><td>Tilt</td><td><select id="gp-tilt" class="gp-axis"></select></td>
+              <td><label><input id="gp-tilt-inv" type="checkbox"> invert</label></td>
+              <td><button class="small" data-detect="gp-tilt">detect</button></td></tr>
+            <tr><td>Zoom stick</td><td><select id="gp-zoom" class="gp-axis"></select></td>
+              <td><label><input id="gp-zoom-inv" type="checkbox"> invert</label></td>
+              <td><button class="small" data-detect="gp-zoom">detect</button></td></tr>
+            <tr><td>Slider</td><td><select id="gp-slider" class="gp-axis"></select></td>
+              <td><label><input id="gp-slider-inv" type="checkbox"> invert</label></td>
+              <td><button class="small" data-detect="gp-slider">detect</button></td></tr>
+            <tr><td>Slider controls</td><td colspan="3"><select id="gp-slider-mode">
+              <option value="speed">Joystick speed</option>
+              <option value="zoom_pos">Zoom position (slider = zoom)</option>
+              <option value="zoom_rate">Zoom rate (centre = stop)</option>
+            </select></td></tr>
+            <tr><td>Deadband</td><td colspan="3"><input id="gp-deadband" type="number" min="0" max="0.5" step="0.01" class="short"></td></tr>
+          </tbody></table>
+          <div id="gp-buttons" class="gp-buttons"></div>
+          <div class="row"><button id="gp-reset" class="small">Reset mapping to defaults</button></div>
+        </details>
+        <p class="hint">Press a button or move the stick once after loading the page so the
+          browser exposes the controller. The page must stay visible (not minimized).</p>
+      </section>
+    </div>
+    <div class="col col-right">
+      <section class="card race">
+        <h2>Race tracking</h2>
+        <h3>1 · Learn the lap</h3>
+        <div class="row">
+          <input id="learn-name" type="text" placeholder="track name (e.g. Circuit)">
+          <button id="btn-learn" class="rec-btn">● Start learning</button>
+          <button id="btn-learn-cancel" class="hidden">Cancel</button>
+        </div>
+        <div id="learn-active" class="hidden">
+          <button id="btn-lap" class="lap-btn">LAP <small>(Space)</small></button>
+          <div id="learn-status" class="muted"></div>
+        </div>
+        <p class="hint">Follow the cars for as many laps as you like and press Space
+          (or LAP) each time a car crosses the start / timing line. On Stop, the laps
+          are averaged into one path at the mean lap time.</p>
+        <div id="build-result" class="hidden">
+          <table id="lap-table"><thead><tr><th>Use</th><th>Lap</th><th>Time</th><th>Deviation</th></tr></thead><tbody></tbody></table>
+          <div class="row"><button id="btn-rebuild" class="small">Rebuild with selected laps</button>
+            <span id="build-info" class="muted"></span></div>
+        </div>
 
-      <div class="sliders replay">
-        <label for="play-speed">Replay speed</label>
-        <input id="play-speed" type="range" min="-3.32" max="2" step="0.01" value="0">
-        <span id="play-speed-val" class="val">1.00×</span>
-      </div>
-      <div class="row">
-        <label><input id="play-loop" type="checkbox"> Loop</label>
-        <button id="btn-play-stop" disabled>■ Stop replay</button>
-        <div class="progress"><div id="play-progress"></div></div>
-      </div>
-      <div id="play-status" class="muted"></div>
-      <table id="recordings"><tbody></tbody></table>
-      <div class="row">
-        <button id="btn-upload" class="small">⬆ Upload a path…</button>
-        <input id="upload-file" type="file" accept=".json,application/json" class="hidden">
-      </div>
-    </section>
+        <h3>2 · Track</h3>
+        <div class="row">
+          <select id="track-select"></select>
+          <label>Target lap <input id="target-lap" type="number" min="1" step="0.1" placeholder="learned" class="short"> s</label>
+        </div>
+        <div class="row">
+          <label><input id="auto-rearm" type="checkbox" checked> Auto re-arm after each lap</label>
+        </div>
+        <div class="row">
+          <label title="After each GO, the next lap time moves halfway to the measured GO-to-GO time">
+            <input id="auto-adjust" type="checkbox"> Auto adjust lap time</label>
+          <label title="Measured laps further than this from the current lap time are ignored (crash, slow lap, another car)">
+            ignore beyond ± <input id="adjust-tol" type="number" min="2" max="100" step="1" value="30" class="short"> %</label>
+        </div>
+        <div id="track-speed" class="muted"></div>
+        <div class="row">
+          <button id="btn-arm">ARM</button>
+          <button id="btn-go" class="go-btn" disabled title="Start the lap now. During a lap: drop it and start the next one">GO <small>(Enter)</small></button>
+          <button id="btn-track-abort" disabled>Abort</button>
+        </div>
+        <div class="row"><div class="progress"><div id="track-progress"></div></div></div>
+        <div id="track-status" class="muted"></div>
+        <p class="hint">ARM moves to the start point and waits. A GO during a lap drops it and
+          glides onto the next one. GO starts the lap: here,
+          with Enter, or from the timing system: UDP <code>{"cmd":"track_go"}</code> to port 9000,
+          or HTTP POST /api/cmd. A joystick move or Stop aborts.</p>
+      </section>
 
-    <section class="card pad-card">
-      <h2>Controller (gamepad / joystick)</h2>
-      <div id="gp-warning" class="result-bad hidden"></div>
-      <div class="row" style="margin-top:0">
-        <select id="gp-select" title="Which controller drives the head"></select>
-        <span id="gp-info" class="muted"></span>
-      </div>
-      <div id="gp-live" class="gp-live"></div>
-      <details id="gp-mapping-box">
-        <summary>Mapping</summary>
-        <table class="gp-map"><tbody>
-          <tr><td>Pan</td><td><select id="gp-pan" class="gp-axis"></select></td>
-            <td><label><input id="gp-pan-inv" type="checkbox"> invert</label></td>
-            <td><button class="small" data-detect="gp-pan">detect</button></td></tr>
-          <tr><td>Tilt</td><td><select id="gp-tilt" class="gp-axis"></select></td>
-            <td><label><input id="gp-tilt-inv" type="checkbox"> invert</label></td>
-            <td><button class="small" data-detect="gp-tilt">detect</button></td></tr>
-          <tr><td>Zoom stick</td><td><select id="gp-zoom" class="gp-axis"></select></td>
-            <td><label><input id="gp-zoom-inv" type="checkbox"> invert</label></td>
-            <td><button class="small" data-detect="gp-zoom">detect</button></td></tr>
-          <tr><td>Slider</td><td><select id="gp-slider" class="gp-axis"></select></td>
-            <td><label><input id="gp-slider-inv" type="checkbox"> invert</label></td>
-            <td><button class="small" data-detect="gp-slider">detect</button></td></tr>
-          <tr><td>Slider controls</td><td colspan="3"><select id="gp-slider-mode">
-            <option value="speed">Joystick speed</option>
-            <option value="zoom_pos">Zoom position (slider = zoom)</option>
-            <option value="zoom_rate">Zoom rate (centre = stop)</option>
-          </select></td></tr>
-          <tr><td>Deadband</td><td colspan="3"><input id="gp-deadband" type="number" min="0" max="0.5" step="0.01" class="short"></td></tr>
-        </tbody></table>
-        <div id="gp-buttons" class="gp-buttons"></div>
-        <div class="row"><button id="gp-reset" class="small">Reset mapping to defaults</button></div>
-      </details>
-      <p class="hint">Press a button or move the stick once after loading the page so the
-        browser exposes the controller. The page must stay visible (not minimized).</p>
-    </section>
+      <section class="card recorder">
+        <h2>Record &amp; replay</h2>
+        <div class="row">
+          <select id="rec-mode" title="Continuous: the whole path is recorded. Keypoints: only the points you add, replayed smoothly.">
+            <option value="continuous">Continuous path</option>
+            <option value="keypoints">Keypoints</option>
+          </select>
+          <input id="rec-name" type="text" placeholder="name (optional)">
+        </div>
+        <div class="row">
+          <label title="The clock starts when the head starts to move, and the motionless end is trimmed">
+            <input id="rec-on-move" type="checkbox" checked> Start when moving (trims idle end)</label>
+        </div>
+        <div class="row">
+          <button id="btn-rec" class="rec-btn">● Record</button>
+          <button id="btn-keypoint" disabled>+ Keypoint</button>
+          <button id="btn-rec-cancel" class="hidden">Cancel</button>
+        </div>
+        <div id="rec-status" class="muted"></div>
 
-    <section class="card race">
-      <h2>Race tracking</h2>
-      <h3>1 · Learn the lap</h3>
-      <div class="row">
-        <input id="learn-name" type="text" placeholder="track name (e.g. Circuit)">
-        <button id="btn-learn" class="rec-btn">● Start learning</button>
-        <button id="btn-learn-cancel" class="hidden">Cancel</button>
-      </div>
-      <div id="learn-active" class="hidden">
-        <button id="btn-lap" class="lap-btn">LAP <small>(Space)</small></button>
-        <div id="learn-status" class="muted"></div>
-      </div>
-      <p class="hint">Follow the cars for as many laps as you like and press Space
-        (or LAP) each time a car crosses the start / timing line. On Stop, the laps
-        are averaged into one path at the mean lap time.</p>
-      <div id="build-result" class="hidden">
-        <table id="lap-table"><thead><tr><th>Use</th><th>Lap</th><th>Time</th><th>Deviation</th></tr></thead><tbody></tbody></table>
-        <div class="row"><button id="btn-rebuild" class="small">Rebuild with selected laps</button>
-          <span id="build-info" class="muted"></span></div>
-      </div>
-
-      <h3>2 · Track</h3>
-      <div class="row">
-        <select id="track-select"></select>
-        <label>Target lap <input id="target-lap" type="number" min="1" step="0.1" placeholder="learned" class="short"> s</label>
-      </div>
-      <div class="row">
-        <label><input id="auto-rearm" type="checkbox" checked> Auto re-arm after each lap</label>
-      </div>
-      <div class="row">
-        <label title="After each GO, the next lap time moves halfway to the measured GO-to-GO time">
-          <input id="auto-adjust" type="checkbox"> Auto adjust lap time</label>
-        <label title="Measured laps further than this from the current lap time are ignored (crash, slow lap, another car)">
-          ignore beyond ± <input id="adjust-tol" type="number" min="2" max="100" step="1" value="30" class="short"> %</label>
-      </div>
-      <div id="track-speed" class="muted"></div>
-      <div class="row">
-        <button id="btn-arm">ARM</button>
-        <button id="btn-go" class="go-btn" disabled title="Start the lap now. During a lap: drop it and start the next one">GO <small>(Enter)</small></button>
-        <button id="btn-track-abort" disabled>Abort</button>
-      </div>
-      <div class="row"><div class="progress"><div id="track-progress"></div></div></div>
-      <div id="track-status" class="muted"></div>
-      <p class="hint">ARM moves to the start point and waits. A GO during a lap drops it and
-        glides onto the next one. GO starts the lap: here,
-        with Enter, or from the timing system: UDP <code>{"cmd":"track_go"}</code> to port 9000,
-        or HTTP POST /api/cmd. A joystick move or Stop aborts.</p>
-    </section>
+        <div class="sliders replay">
+          <label for="play-speed">Replay speed</label>
+          <input id="play-speed" type="range" min="-3.32" max="2" step="0.01" value="0">
+          <span id="play-speed-val" class="val">1.00×</span>
+        </div>
+        <div class="row">
+          <label><input id="play-loop" type="checkbox"> Loop</label>
+          <button id="btn-play-stop" disabled>■ Stop replay</button>
+          <div class="progress"><div id="play-progress"></div></div>
+        </div>
+        <div id="play-status" class="muted"></div>
+        <table id="recordings"><tbody></tbody></table>
+        <div class="row">
+          <button id="btn-upload" class="small">⬆ Upload a path…</button>
+          <input id="upload-file" type="file" accept=".json,application/json" class="hidden">
+        </div>
+      </section>
+    </div>
 
     <section id="debug-card" class="card debug hidden">
       <h2>Debug console</h2>

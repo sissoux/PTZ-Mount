@@ -47,7 +47,7 @@ input[type=text] { flex: 1; min-width: 80px; }
 .knob { position: absolute; width: 22%; height: 22%; left: 39%; top: 39%; border-radius: 50%;
         background: var(--accent); box-shadow: 0 2px 10px #0008; z-index: 1; pointer-events: none; }
 .zoom { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.zoom input { writing-mode: vertical-lr; direction: rtl; height: 260px; width: 32px; touch-action: none; }
+.zoom input[type=range] { writing-mode: vertical-lr; direction: rtl; height: 260px; width: 32px; touch-action: none; }
 .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); }
@@ -160,3 +160,35 @@ tr.inactive td:not(:first-child) { opacity: .4; }
 .readout .ax.inactive { opacity: .35; }
 .axis-toggle { font-size: 11px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
 .zoom input[type=range]:disabled { opacity: .3; }
+
+/* ---- v0.5.2: dashboard layout, designed for 1920x1080 (16:9) ---- */
+main.layout { display: grid; gap: 14px; padding: 14px; align-items: start;
+              grid-template-columns: minmax(470px, 520px) minmax(600px, 660px) minmax(520px, 1fr); }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+main.layout > .debug { grid-column: 1 / -1; }
+.card { padding: 14px; }
+h2 { margin-bottom: 10px; }
+/* Axes table: compact, never clipped */
+.axes-card { overflow-x: auto; }
+#axes { font-size: 13px; }
+#axes th, #axes td { padding: 5px 4px; white-space: nowrap; }
+#axes th:first-child, #axes td:first-child { width: 30px; text-align: center; }
+#axes td:nth-child(3) { min-width: 78px; }
+#axes td input[type=number] { width: 74px; }
+#axes .flag { margin-right: 2px; padding: 1px 5px; }
+#axes td:last-child { text-align: right; }
+.axes-card .buttons { gap: 8px; }
+/* left column */
+.control .pad { max-width: 340px; }
+.readout .value { font-size: 24px; }
+/* right column: race tracking first, then record & replay */
+.race .row, .recorder .row { gap: 8px; }
+/* narrower screens: 2 columns, then 1 */
+@media (max-width: 1720px) {
+  main.layout { grid-template-columns: minmax(440px, 1fr) minmax(560px, 1.25fr); }
+  .col-right { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+}
+@media (max-width: 1100px) {
+  main.layout { grid-template-columns: 1fr; }
+  .col-right { display: flex; }
+}

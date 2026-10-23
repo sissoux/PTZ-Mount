@@ -78,6 +78,8 @@ class MotionController:
         self.accel_axis = {a.name: a.jog_accel for a in self.axes}
         self.smoothing = m.smoothing          # ease in/out 0..1
         # Blocking mode: only the lock owner (a web client id) may move the head
+        # axes in use (an absent zoom drive can be switched off live)
+        self.axis_active = {a.name: a.active for a in self.axes}
         self.lock_owner: Optional[str] = None
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
@@ -324,6 +326,9 @@ class MotionController:
             for n, v in (data.get(key) or {}).items():
                 if n in dst and isinstance(v, num):
                     dst[n] = float(v)
+        for n, v in (data.get("axis_active") or {}).items():
+            if n in self.axis_active and isinstance(v, bool):
+                self.axis_active[n] = v
         for k in ("smoothing", "play_speed"):
             if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
@@ -332,7 +337,7 @@ class MotionController:
         data = {"advanced": self.advanced, "speed_all": self.speed_all,
                 "accel_all": self.accel_all, "speed_axis": self.speed_axis,
                 "accel_axis": self.accel_axis, "smoothing": self.smoothing,
-                "play_speed": self.play_speed}
+                "play_speed": self.play_speed, "axis_active": self.axis_active}
         try:
             os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
             with open(self._settings_path, "w", encoding="utf-8") as f:
@@ -396,6 +401,34 @@ class MotionController:
             "play_loop": self.play_loop,
         }
 
+    # ================================================================ axis on / off
+    async def set_axis_active(self, name: str, on: bool) -> None:
+        """Switch an axis on or off live (e.g. zoom drive not fitted).
+
+        Off: it stops, its driver is unpowered, it loses its homing and is left
+        out of jogs, Home all, presets and replays. On: the driver is powered
+        and the axis must be homed before it moves."""
+        ax = self.axis(name)
+        on = bool(on)
+        if self.axis_active[name] == on:
+            return
+        if not on:
+            if self._traj is not None and name in self._traj.axes:
+                self._cancel_motion()
+            self._cancel_jog([name])
+            self.axis_active[name] = False
+            if self.ready:
+                await self.link.request("STOP", axis_mask=1 << ax.index)
+                await self.link.request("ENABLE", axis_mask=1 << ax.index, enable_mask=0)
+            self.state[name].homed = False
+        else:
+            self.axis_active[name] = True
+            self.state[name].homed = False
+            if self.ready and self.cfg.motion.enable_on_start:
+                await self.enable(True, [name])
+        self._save_settings()
+        log.info("axis %s %s", name, "enabled: home it before use" if on else "disabled")
+
     # ================================================================ blocking mode
     def lock(self, client: str, label: str) -> None:
         if self.lock_owner not in (None, client):
@@ -453,7 +486,7 @@ class MotionController:
             return []
         now = asyncio.get_running_loop().time()
         shaped = {n: self._shape(v) for n, v in values.items()
-                  if n in self.state and n not in self._homing}
+                  if n in self.state and n not in self._homing and self.axis_active.get(n)}
         if scale is not None:
             for n in shaped:
                 k = scale.get(n, 1.0) if isinstance(scale, dict) else scale
@@ -662,6 +695,10 @@ class MotionController:
         self._check_ready()
         k = max(0.01, min(1.0, speed))
         start, final, vmax, amax = {}, {}, {}, {}
+        skipped = [n for n in targets if n in self.state and not self.axis_active[n]]
+        targets = {n: v for n, v in targets.items() if n not in skipped}
+        if skipped and not targets:
+            raise MotionError(f"{', '.join(skipped)} is disabled")
         for name, target in targets.items():
             ax = self.axis(name)
             if not self.state[name].homed:
@@ -743,6 +780,10 @@ class MotionController:
 
     async def enable(self, on: bool, names: Optional[Iterable[str]] = None) -> None:
         names = list(names) if names else [a.name for a in self.axes]
+        if on:                                   # inactive axes stay unpowered
+            names = [n for n in names if self.axis_active.get(n)]
+            if not names:
+                return
         mask = 0
         for n in names:
             mask |= 1 << self.axis(n).index
@@ -755,13 +796,27 @@ class MotionController:
     async def home(self, names: Optional[Iterable[str]] = None) -> None:
         """Home the given axes, or every axis with home_with_all = True."""
         self.last_error = ""
-        names = list(names) if names else [a.name for a in self.axes if a.home_with_all]
+        if names:
+            names = list(names)
+            off = [n for n in names if not self.axis_active.get(n, True)]
+            if off:
+                raise MotionError(f"{', '.join(off)} is disabled: enable it first")
+        else:
+            names = [a.name for a in self.axes if a.home_with_all and self.axis_active[a.name]]
         self._check_ready()
         if not names:
             raise MotionError("no axis to home")
-        await asyncio.gather(*(self._home_axis(self.axis(n)) for n in names))
+        parks = await asyncio.gather(*(self._home_axis(self.axis(n)) for n in names))
+        # one combined move to the park positions: a move per axis would
+        # interrupt each other (a single trajectory runs at a time)
+        targets = {n: t for n, t in zip(names, parks) if t is not None}
+        if targets:
+            log.info("moving to %s after homing",
+                     ", ".join(f"{n} {t:g}" for n, t in targets.items()))
+            await self.goto(targets, wait=True)
 
-    async def _home_axis(self, ax: AxisConfig) -> None:
+    async def _home_axis(self, ax: AxisConfig) -> Optional[float]:
+        """Home one axis. Returns where it should park (or None)."""
         st = self.state[ax.name]
         if ax.name in self._homing:
             raise MotionError(f"axis '{ax.name}' already homing")
@@ -794,8 +849,7 @@ class MotionController:
         target = ax.park_position
         if target is None and not ax.position_min <= ax.position_endstop <= ax.position_max:
             target = min(max(ax.position_endstop, ax.position_min), ax.position_max)
-        if target is not None:
-            await self.goto({ax.name: target}, wait=True)
+        return target
 
     async def _set_position(self, ax: AxisConfig, units: float) -> None:
         steps = ax.to_steps(units)
@@ -887,7 +941,8 @@ class MotionController:
         """Start replaying a recording (returns immediately)."""
         self._check_ready()
         rec = self.recorder.load(name)
-        axes = [n for n in rec["points"][0]["pos"] if n in self.state]
+        axes = [n for n in rec["points"][0]["pos"]
+                if n in self.state and self.axis_active[n]]
         if not axes:
             raise MotionError("recording uses no configured axis")
         for n in axes:
@@ -984,7 +1039,8 @@ class MotionController:
         """Move to the start point of a learned lap and wait for GO."""
         self._check_ready()
         rec = self.recorder.load(name)
-        axes = [n for n in rec["points"][0]["pos"] if n in self.state]
+        axes = [n for n in rec["points"][0]["pos"]
+                if n in self.state and self.axis_active[n]]
         if not axes:
             raise MotionError("track uses no configured axis")
         for n in axes:
@@ -1105,6 +1161,7 @@ class MotionController:
                 "min": ax.position_min,
                 "max": ax.position_max,
                 "units": ax.units,
+                "active": self.axis_active[ax.name],
             }
         playback = None
         if self.playback is not None:

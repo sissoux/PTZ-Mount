@@ -95,11 +95,14 @@ function buildAxesTable() {
   tb.innerHTML = "";
   for (const a of config.axes) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${a.name}</td><td class="num" id="pos-${a.name}">-</td>
+    tr.id = `row-${a.name}`;
+    tr.innerHTML = `<td><input type="checkbox" id="active-${a.name}" title="Axis in use (off: unpowered, left out of Home all, presets and replays)"></td>
+      <td>${a.name}</td><td class="num" id="pos-${a.name}">-</td>
       <td class="num" id="vel-${a.name}">-</td><td id="st-${a.name}"></td>
       <td><input id="goto-${a.name}" type="number" step="any" min="${a.min}" max="${a.max}" title="${a.min}..${a.max} ${a.units}"></td>
       <td><button class="small" title="Home this axis only">Home</button></td>`;
     tr.querySelector("button").onclick = () => send({ cmd: "home", axes: [a.name], id: "ha" });
+    tr.querySelector(`#active-${a.name}`).onchange = (e) => setAxisActive(a.name, e.target.checked);
     tb.appendChild(tr);
   }
   const homed = config.axes.filter((a) => a.home_with_all).map((a) => a.name);
@@ -128,6 +131,12 @@ function buildAxisSliders() {
   }
 }
 
+// ------------------------------------------------------------ axis on / off
+function setAxisActive(name, on) {
+  send({ cmd: "axis_active", axis: name, on, id: "act" });
+  if (on) showError(`${name} switched on: home it before use`);
+}
+
 // ------------------------------------------------------------ status
 function flag(text, on, cls = "on") { return `<span class="flag ${on ? cls : ""}">${text}</span>`; }
 
@@ -154,12 +163,21 @@ function renderStatus(s) {
     $(`st-${name}`).innerHTML = flag("homed", a.homed) + flag("on", a.enabled)
       + flag("endstop", a.endstop, "warn") + (a.homing ? flag("homing", true, "warn") : "")
       + (a.at_limit ? flag("limit", true, "warn") : "");
+    const act = $(`active-${name}`);
+    if (act && document.activeElement !== act) act.checked = a.active !== false;
+    $(`row-${name}`).classList.toggle("inactive", a.active === false);
+    if (name === "zoom") {
+      const z = $("zoom-active");
+      if (document.activeElement !== z) z.checked = a.active !== false;
+      $("zoom").disabled = a.active === false;
+    }
     const ro = $(`ro-${name}`);
     if (ro) {
+      ro.classList.toggle("inactive", a.active === false);
       $(`ro-val-${name}`).textContent = fmtPos(a.pos, a.units);
       ro.classList.toggle("unhomed", !a.homed);
       ro.classList.toggle("moving", a.moving);
-      $(`ro-tag-${name}`).textContent = a.homing ? "homing" : !a.homed ? "not homed"
+      $(`ro-tag-${name}`).textContent = a.active === false ? "off" : a.homing ? "homing" : !a.homed ? "not homed"
         : a.at_limit ? "limit" : a.endstop ? "endstop" : "";
     }
   }
@@ -484,6 +502,8 @@ $("target-lap").onchange = () => {
   const v = parseFloat($("target-lap").value);
   send({ cmd: "track_set", target_lap: isNaN(v) ? 0 : v, id: "tl" });
 };
+
+$("zoom-active").onchange = () => setAxisActive("zoom", $("zoom-active").checked);
 
 // ------------------------------------------------------------ pad (pan/tilt)
 const pad = $("pad"), knob = $("knob");

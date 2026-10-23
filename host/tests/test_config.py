@@ -36,6 +36,9 @@ def test_load_default_config():
     # switches inside the travel range -> no guard; zoom switch at min -> guard
     assert not pan.endstop_guard and not cfg.axes["tilt"].endstop_guard
     assert cfg.axes["zoom"].endstop_guard
+    # zoom drive not always fitted: off by default; axes park at 0 after homing
+    assert cfg.axes["zoom"].active is False and pan.active is True
+    assert pan.park_position == 0 and cfg.axes["tilt"].park_position == 0
 
 
 # Klipper section -> PTZ axis

@@ -154,3 +154,9 @@ code { font-size: 12px; background: #15171a; padding: 1px 4px; border-radius: 3p
 .gp-buttons select { flex: 1; padding: 3px 4px; }
 details summary { cursor: pointer; color: var(--muted); margin-top: 10px; }
 .gp-detecting { border-color: var(--warn) !important; }
+
+/* ---- v0.5.1: axes switched off ---- */
+tr.inactive td:not(:first-child) { opacity: .4; }
+.readout .ax.inactive { opacity: .35; }
+.axis-toggle { font-size: 11px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+.zoom input[type=range]:disabled { opacity: .3; }

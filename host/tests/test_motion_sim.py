@@ -93,8 +93,9 @@ def test_home_and_goto(tmp_path):
         await ctrl.home()
         st = ctrl.status()["axes"]
         assert all(a["homed"] for a in st.values())
-        # pan endstop is outside the soft range -> parked inside it
-        assert ctrl.position("pan") == pytest.approx(-170, abs=0.1)
+        # parked at 0 after homing (default park_position)
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.1)
+        assert ctrl.position("tilt") == pytest.approx(0, abs=0.1)
         await ctrl.goto({"pan": 30, "tilt": 10, "zoom": 45}, wait=True)
         await asyncio.sleep(0.05)
         pos = ctrl.positions()
@@ -192,7 +193,7 @@ def test_homing_with_switch_inside_range(tmp_path):
     may start on the pressed side; homing must back off until released."""
     text = (FAST_CFG.replace("position_min: -170", "position_min: -180")
             .replace("position_max: 170", "position_max: 180")
-            .replace("position_endstop: -175", "position_endstop: -96"))
+            .replace("position_endstop: -175", "position_endstop: -96\npark_position: none"))
 
     async def t(ctrl):
         assert not ctrl.axis("pan").endstop_guard
@@ -571,3 +572,37 @@ def test_jog_scale_applies_after_deadband(tmp_path):
         ctrl.jog({"pan": 0.8}, scale="junk")                         # ignored, no crash
         await ctrl.stop()
     run(t, tmp_path)
+
+
+def test_inactive_axis_is_left_out_and_can_be_switched_on(tmp_path):
+    text = FAST_CFG.replace("[axis zoom]\n", "[axis zoom]\nactive: False\n")
+
+    async def t(ctrl):
+        assert ctrl.status()["axes"]["zoom"]["active"] is False
+        await asyncio.sleep(0.1)
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]           # driver unpowered
+        await ctrl.home()                                             # Home all skips it
+        st = ctrl.status()["axes"]
+        assert st["pan"]["homed"] and st["tilt"]["homed"] and not st["zoom"]["homed"]
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.1)     # parked at 0
+        with pytest.raises(Exception, match="disabled"):
+            await ctrl.home(["zoom"])
+        assert ctrl.jog({"zoom": 1.0}) == []                          # silently ignored
+        assert not ctrl.state["zoom"].jog_active
+        r = await dispatch(ctrl, {"cmd": "goto", "zoom": 10})
+        assert not r["ok"] and "disabled" in r["error"]
+        await ctrl.goto({"pan": 20, "zoom": 50}, wait=True)           # zoom left out
+        assert ctrl.position("pan") == pytest.approx(20, abs=0.1)
+        # switch it on live: powered, must be homed, then usable
+        assert (await dispatch(ctrl, {"cmd": "axis_active", "axis": "zoom", "on": True}))["ok"]
+        await asyncio.sleep(0.1)
+        assert ctrl.status()["axes"]["zoom"]["enabled"] and not ctrl.state["zoom"].homed
+        await ctrl.home(["zoom"])
+        await ctrl.goto({"zoom": 30}, wait=True)
+        assert ctrl.position("zoom") == pytest.approx(30, abs=0.1)
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["axis_active"]["zoom"] is True                    # remembered
+        await ctrl.set_axis_active("zoom", False)
+        await asyncio.sleep(0.1)
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]
+    run(t, tmp_path, text)

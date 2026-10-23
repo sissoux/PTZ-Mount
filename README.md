@@ -188,5 +188,7 @@ stops by itself.
 | Option | Effect |
 |---|---|
 | `enabled: False` | Axis ignored entirely (hardware not fitted) |
+| `active: False` | Axis off at startup: driver unpowered, left out of Home all, jogs, presets and replays. Switched on live with its checkbox (zoom: under the zoom rocker). The choice is remembered on the Pi. |
+| `park_position: 0` | Where the axis goes once homed. Default 0 when 0 is within the travel; `none` stays where homing ended. |
 | `home_with_all: False` | Axis skipped by "Home all" and default homing, still homable alone |
 | `endstop_guard: auto` | MCU stops the axis on its switch outside homing, only if the switch is at the end of travel |

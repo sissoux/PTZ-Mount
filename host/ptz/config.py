@@ -186,6 +186,7 @@ class AxisConfig:
     jog_accel: float
     home_with_all: bool = True       # included in "Home all" / default homing
     units: str = "°"                 # display label of the axis unit
+    active: bool = True              # in use at startup (can be toggled live)
     endstop_guard: bool = True       # MCU halts the axis on its endstop outside homing
     tmc: Optional[TmcConfig] = None
 
@@ -284,7 +285,15 @@ def load(path: str) -> PtzConfig:
         max_vel = s.getfloat("max_velocity", _REQUIRED, 0)
         max_acc = s.getfloat("max_accel", _REQUIRED, 0)
         homing_speed = s.getfloat("homing_speed", max_vel / 4, 0)
-        park = s.getfloat("park_position", None)
+        # park_position: where to go once homed. Default 0 when 0 is within
+        # the travel; "none" stays where homing ended.
+        park_txt = (s.get("park_position", "") or "").strip().lower()
+        if park_txt in ("none", "off", "no"):
+            park = None
+        elif park_txt == "":
+            park = 0.0 if pmin <= 0.0 <= pmax else None
+        else:
+            park = s.getfloat("park_position")
         ax = AxisConfig(
             name=aname, index=len(axes),
             step_pin=parse_pin(s.get("step_pin", _REQUIRED)),
@@ -307,6 +316,7 @@ def load(path: str) -> PtzConfig:
             jog_accel=s.getfloat("jog_accel", max_acc, 0, max_acc),
             home_with_all=s.getbool("home_with_all", True),
             units=_units(s.get("units", "°")),
+            active=s.getbool("active", True),
         )
         # Endstop guard: only meaningful when the switch sits at the end of
         # travel. If position_endstop is inside [min, max] (switch in the middle

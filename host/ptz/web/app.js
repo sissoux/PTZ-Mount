@@ -561,6 +561,7 @@ document.addEventListener("keyup", (e) => {
 // this browser. Button numbers are shown 1-based like Windows' joy.cpl.
 const GP_ACTIONS = [["", "-"], ["lapgo", "Lap / GO (race)"], ["lap", "Lap mark"], ["go", "GO"],
   ["arm", "ARM track"], ["stop", "Stop"], ["estop", "E-STOP"], ["home", "Home all"],
+  ["center", "Go to 0 / 0"],
   ["rec", "Record start / stop"]]
   .concat(Array.from({ length: NUM_PRESETS }, (_, i) => [`preset:${i + 1}`, `Preset ${i + 1}`]));
 const gp = { id: null, map: null, prevAxes: {}, prevButtons: [], activity: {}, detect: null,
@@ -639,6 +640,7 @@ function gpAction(a) {
     case "stop": send({ cmd: "stop", id: "st" }); break;
     case "estop": send({ cmd: "estop", id: "es" }); break;
     case "home": send({ cmd: "home", id: "ho" }); break;
+    case "center": goCenter(); break;
     case "rec": $("btn-rec").click(); break;
   }
 }
@@ -833,6 +835,12 @@ $("btn-estop").onclick = () =>
   send(status && status.estop ? { cmd: "clear_estop", id: "ce" } : { cmd: "estop", id: "es" });
 $("btn-stop").onclick = () => send({ cmd: "stop", id: "st" });
 $("btn-home").onclick = () => send({ cmd: "home", id: "ho" });
+function goCenter() {
+  const msg = { cmd: "goto", id: "c0" };
+  for (const n of ["pan", "tilt"]) if (status && status.axes[n] && status.axes[n].active !== false) msg[n] = 0;
+  send(msg);
+}
+$("btn-center").onclick = goCenter;
 $("btn-enable").onclick = () => send({ cmd: "enable", on: true, id: "en" });
 $("btn-disable").onclick = () => {
   if (confirm("Release motors? The tilt axis may drop and all axes lose their homing."))

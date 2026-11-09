@@ -44,6 +44,10 @@ function connect() {
 }
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function onReply(m) {
+  if (m.cmd === "lens_save" && lensWizardOpen) {
+    if (m.ok) closeLensWizard(false); else $("lw-msg").textContent = m.error;
+    return;
+  }
   if (!m.ok) { showError(m.error); return; }
   if ((m.cmd === "record_stop" || m.cmd === "track_build") && m.recording && m.recording.mode === "track") {
     showBuild(m.recording);
@@ -308,6 +312,7 @@ function renderStatus(s) {
   if (config && s.settings) renderSettings(s.settings);
   if (config && s.limits) renderLimits(s.limits, s.axes);
   if (s.level) renderLevel(s.level);
+  if (s.lens) renderLens(s.lens, s.axes.zoom);
   renderShutdown(s.shutdown);
   renderLock(s.lock);
   renderClients();
@@ -645,6 +650,97 @@ function followTyped() {
 $("btn-car-add").onclick = followTyped;
 $("car-add").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); followTyped(); } };
 
+// ------------------------------------------------------------ zoom lenses
+let lensWizardOpen = false, lensPrev = null;
+function zoomEnds(zc) {
+  const l = status && status.lens && status.lens.list.find((x) => x.name === status.lens.current);
+  return l ? [l.wide, l.tele] : [zc.min, zc.max];
+}
+function renderLens(lens, za) {
+  const sel = $("lens-select");
+  const key = JSON.stringify([lens.list.map((l) => [l.name, l.focal_min, l.focal_max]), lens.current]);
+  if (sel.dataset.key !== key && document.activeElement !== sel) {
+    sel.innerHTML = `<option value="">No lens (motor direction)</option>`
+      + lens.list.map((l) => `<option value="${escapeHtml(l.name)}">${escapeHtml(l.name)} · ${l.focal_min}-${l.focal_max} mm</option>`).join("")
+      + `<option value="__new">+ Learn a new lens…</option>`;
+    sel.value = lens.current || "";
+    sel.dataset.key = key;
+  }
+  $("btn-lens-edit").disabled = $("btn-lens-del").disabled = !lens.current;
+  $("lens-info").textContent = lens.focal != null ? `${Math.round(lens.focal)} mm` : "";
+  if (lens.focal != null && $("ro-val-zoom")) $("ro-val-zoom").textContent = `${Math.round(lens.focal)} mm`;
+  if (lensWizardOpen && za) renderLensWizard(za);
+}
+$("lens-select").onchange = () => {
+  const v = $("lens-select").value;
+  if (v === "__new") {
+    $("lens-select").value = (status && status.lens && status.lens.current) || "";
+    openLensWizard(null);
+  } else {
+    send({ cmd: "lens_select", name: v || null, id: "ls" });
+  }
+};
+$("btn-lens-edit").onclick = () => openLensWizard(status.lens.current);
+$("btn-lens-del").onclick = () => {
+  const n = status.lens.current;
+  if (n && confirm(`Forget the lens "${n}"?`)) send({ cmd: "lens_delete", name: n, id: "ld" });
+};
+function niceStep(v) {
+  const e = Math.pow(10, Math.floor(Math.log10(v))), f = v / e;
+  return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e;
+}
+function openLensWizard(name) {
+  const zc = axisCfg("zoom");
+  if (!zc) { showError("no zoom axis in the configuration"); return; }
+  lensPrev = status.lens.current;
+  const l = name ? status.lens.list.find((x) => x.name === name) : null;
+  $("lw-name").value = l ? l.name : "";
+  $("lw-fmin").value = l ? l.focal_min : "";
+  $("lw-fmax").value = l ? l.focal_max : "";
+  $("lw-msg").textContent = "";
+  const big = niceStep((zc.max - zc.min) / 25), steps = [big, niceStep(big / 5), niceStep(big / 25)];
+  const u = zc.units === "°" ? "°" : ` ${zc.units}`;
+  $("lw-steps").innerHTML = `<span class="muted">back to the endstop</span>`
+    + steps.map((d) => `<button class="small" data-d="${-d}">−${d}${u}</button>`).join("")
+    + [...steps].reverse().map((d) => `<button class="small" data-d="${d}">+${d}${u}</button>`).join("")
+    + `<span class="muted">away from the endstop</span>`;
+  $("lw-steps").querySelectorAll("[data-d]").forEach((b) => {
+    b.onclick = () => send({ cmd: "move_rel", zoom: parseFloat(b.dataset.d), id: "lwm" });
+  });
+  if (lensPrev) send({ cmd: "lens_select", name: null, id: "ls" });   // full travel, motor direction
+  lensWizardOpen = true;
+  $("lens-wizard").classList.remove("hidden");
+  renderLensWizard(status.axes.zoom);
+}
+function closeLensWizard(restore) {
+  lensWizardOpen = false;
+  $("lens-wizard").classList.add("hidden");
+  if (restore && lensPrev) send({ cmd: "lens_select", name: lensPrev, id: "ls" });
+}
+function renderLensWizard(za) {
+  const on = za.active !== false, ready = on && za.homed;
+  $("lw-state").textContent = !on ? "Zoom drive off" : za.homing ? "Homing…"
+    : !za.homed ? "Not homed: homing turns the ring until the endstop" : "Homed ✓";
+  $("lw-state").classList.toggle("ok", ready);
+  $("lw-on").classList.toggle("hidden", on);
+  $("lw-home").disabled = !on || za.homing;
+  $("lw-pos").textContent = za.homed ? fmtPos(za.pos, za.units) : "-";
+  $("lw-steps").querySelectorAll("button").forEach((b) => { b.disabled = !ready; });
+  $("lw-tele").disabled = $("lw-wide").disabled = !ready;
+}
+$("lw-on").onclick = () => setAxisActive("zoom", true);
+$("lw-home").onclick = () => send({ cmd: "home", axes: ["zoom"], id: "lwh" });
+$("lw-cancel").onclick = () => closeLensWizard(true);
+for (const at of ["tele", "wide"]) {
+  $(`lw-${at}`).onclick = () => {
+    const name = $("lw-name").value.trim();
+    const fmin = parseFloat($("lw-fmin").value), fmax = parseFloat($("lw-fmax").value);
+    if (!name) { $("lw-msg").textContent = "Give the lens a name"; return; }
+    if (!(fmin > 0 && fmax > fmin)) { $("lw-msg").textContent = "Min focal must be above 0 and below max focal"; return; }
+    send({ cmd: "lens_save", name, focal_min: fmin, focal_max: fmax, at, id: "lsave" });
+  };
+}
+
 // ------------------------------------------------------------ live view
 function setLive(on) {
   document.body.classList.toggle("live", on);
@@ -905,13 +1001,14 @@ function pollController() {
     } else if (m.sliderMode === "zoom_pos" && config && status) {
       const zc = axisCfg("zoom"), zs = status.axes.zoom;
       if (zc && zs && zs.homed) {
-        const range = zc.max - zc.min, target = zc.min + t * range;
+        const [wide, tele] = zoomEnds(zc), sign = tele < wide ? -1 : 1;
+        const range = Math.abs(tele - wide), target = wide + t * (tele - wide);
         if (gp.sliderLast === null || Math.abs(t - gp.sliderLast) > 0.004) gp.zoomFollow = true;
         gp.sliderLast = t;
         const err = target - zs.pos;
         if (gp.zoomFollow && Math.abs(err) < 0.004 * range) gp.zoomFollow = false;
         if (gp.zoomFollow) {        // follow the slider; stops once reached
-          const f = Math.max(-1, Math.min(1, err / (0.08 * range)));
+          const f = sign * Math.max(-1, Math.min(1, err / (0.08 * range)));   // + = zoom in
           z = Math.abs(f) > Math.abs(z) ? f : z;
         }
       }

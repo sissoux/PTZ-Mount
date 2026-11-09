@@ -282,3 +282,27 @@ body.live .col-right { grid-column: auto; display: flex; }
 body.live .readout .value { font-size: 30px; }
 body.live .car-btn b { font-size: 22px; }
 @media (max-width: 1000px) { body.live main.layout { grid-template-columns: 1fr; } }
+
+/* ---- v0.11: zoom lenses ---- */
+.zt { font-size: 11px; font-weight: 700; color: var(--muted); }
+.lens-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+.lens-row label { color: var(--muted); font-size: 12px; }
+.lens-row select { flex: 1; min-width: 0; }
+.lens-info { font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
+.modal { position: fixed; inset: 0; z-index: 60; background: rgba(10, 11, 13, .8);
+         display: flex; align-items: center; justify-content: center; padding: 16px; }
+.modal-box { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+             padding: 18px 20px; width: min(640px, 100%); max-height: 100%; overflow: auto; }
+.modal-box h3 { margin: 16px 0 8px; font-size: 13px; }
+.lw-form { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.lw-form label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.lw-form label:first-child { flex: 1 1 100%; }
+.lw-state { font-size: 13px; color: var(--warn); }
+.lw-state.ok { color: var(--ok); }
+.lw-pos { font-size: 13px; margin-bottom: 8px; }
+.lw-pos b { font: 600 18px ui-monospace, Consolas, monospace; }
+.lw-steps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.lw-steps button { min-width: 56px; }
+.lw-ends button { flex: 1; padding: 10px; }
+.lw-msg { color: var(--danger); font-size: 13px; min-height: 1.3em; margin-top: 8px; }
+.lw-foot { justify-content: flex-end; }

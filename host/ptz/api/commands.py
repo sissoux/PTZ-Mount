@@ -23,6 +23,14 @@ Base levelling (mount standing at an angle: jog pan / tilt in a level frame)
     {"cmd": "level_enable", "on": true}
     {"cmd": "level_mark"}     the camera looks level now: learn pitch / roll from the marks
     {"cmd": "level_clear"}    forget the marks, pitch = roll = 0
+Zoom lenses (the zoom drive turns the lens's zoom ring)
+    {"cmd": "lens_save", "name": "Sony 70-200", "focal_min": 70, "focal_max": 200,
+     "at": "tele"}           learning: zoom homed, then moved to the other end of the
+                             ring; "at": the end it is at now ("tele" or "wide")
+    {"cmd": "lens_select", "name": "Sony 70-200"}   (null: none)   {"cmd": "lens_delete", "name": "..."}
+    {"cmd": "zoom_focal", "focal": 135}     zoom to a focal length (mm), lens selected
+    With a lens selected, a positive zoom jog always zooms in, whatever the
+    direction of its ring, and the zoom stays between the ring's two ends.
 Shutdown
     {"cmd": "shutdown"}        rest position, motors off, files flushed, Pi powered off
     {"cmd": "shutdown", "poweroff": false}   same, but the Pi stays on (safe to unplug)
@@ -184,6 +192,18 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             ctrl.enable_level(bool(msg.get("on", True)))
         elif cmd == "level_mark":
             reply["level"] = ctrl.level_mark()
+        elif cmd == "lens_save":
+            reply["lens"] = await ctrl.lens_save(msg.get("name"), msg.get("focal_min"),
+                                                 msg.get("focal_max"), msg.get("at"),
+                                                 msg.get("wide"), msg.get("tele"))
+        elif cmd == "lens_select":
+            await ctrl.lens_select(msg.get("name"))
+        elif cmd == "lens_delete":
+            await ctrl.lens_delete(msg.get("name"))
+        elif cmd == "lenses":
+            reply["lens"] = ctrl.lens_status()
+        elif cmd == "zoom_focal":
+            await ctrl.zoom_to_focal(msg["focal"], speed=float(msg.get("speed", 1.0)), wait=wait)
         elif cmd == "level_clear":
             ctrl.level_clear()
         # ------------------------------------------------ shutdown

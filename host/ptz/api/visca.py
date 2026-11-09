@@ -126,9 +126,7 @@ class ViscaServer(asyncio.DatagramProtocol):
                     return [bytes([0x90, 0x50]) + _int_to_nibbles(pan)
                             + _int_to_nibbles(tilt) + b"\xFF"]
                 if p[2:4] == bytes([0x04, 0x47]) and "zoom" in c.state:
-                    ax = c.axis("zoom")
-                    frac = (c.position("zoom") - ax.position_min) / (ax.position_max - ax.position_min)
-                    val = int(max(0.0, min(1.0, frac)) * DIRECT_ZOOM_MAX)
+                    val = int(c.zoom_fraction() * DIRECT_ZOOM_MAX)     # 0 = wide
                     return [bytes([0x90, 0x50]) + _int_to_nibbles(val) + b"\xFF"]
                 return [ERR_SYNTAX]
             if p[1] != 0x01:
@@ -174,10 +172,8 @@ class ViscaServer(asyncio.DatagramProtocol):
                 self._set_drive(zoom=v)
                 return [ACK, COMPLETION]
             if cat == 0x04 and cmd == 0x47 and len(p) == 9 and "zoom" in c.state:
-                ax = c.axis("zoom")
                 frac = _nibbles_to_int(p[4:8], signed=False) / DIRECT_ZOOM_MAX
-                self._spawn(c.goto({"zoom": ax.position_min
-                                    + frac * (ax.position_max - ax.position_min)}))
+                self._spawn(c.zoom_to_fraction(frac))
                 return [ACK, COMPLETION]
             # ---- presets
             if cat == 0x04 and cmd == 0x3F and len(p) == 7:

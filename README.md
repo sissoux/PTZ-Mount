@@ -191,6 +191,13 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   With *Enabled* ticked, nothing can drive the head past them: jog, presets,
   replays, tracking and scripts all stop at the limits. Untick it to use the
   whole travel again; the learned values are kept on the Pi.
+* **Lens** (under the pad): choose the lens fitted. Zoom up / T, PgUp and
+  VISCA tele then always zoom in, whichever way the lens's ring turns
+  (Sony and Canon turn opposite ways), the zoom stops at the ring's two
+  ends, and the zoom readout shows the focal length. *+ Learn a new lens…*
+  asks for its name and min / max focal, homes the zoom (the endstop is one
+  end of the ring), then you step the ring to its other end and say
+  whether the picture is now zoomed in or out. ✎ learns the lens again.
 * **Base level** (middle column), for a mount standing at an angle: aim the
   camera level (its electronic level at 0, or the horizon centred) and press
   *Mark level here*, at two pan angles at least 30° apart, then tick *Level

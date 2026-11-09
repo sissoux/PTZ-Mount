@@ -984,3 +984,63 @@ def test_car_list_and_follow_leader(tmp_path, monkeypatch):
         assert st["list"] == [] and st["current"] is None
         assert json.loads((tmp_path / "settings.json").read_text())["cars"] == []
     run(t, tmp_path)
+
+
+def test_zoom_lenses_both_ring_directions(tmp_path):
+    async def jog_zoom(ctrl, v, s=0.3):
+        for _ in range(int(s / 0.05)):
+            ctrl.jog({"zoom": v})
+            await asyncio.sleep(0.05)
+        ctrl.jog({"zoom": 0})
+        for _ in range(100):
+            if ctrl.state["zoom"].vel == 0:
+                break
+            await asyncio.sleep(0.02)
+
+    async def t(ctrl):
+        await ctrl.home(["zoom"])
+        assert ctrl.zoom_sign() == 1 and ctrl.status()["lens"]["current"] is None
+        assert not (await dispatch(ctrl, {"cmd": "lens_save", "name": "x", "focal_min": 70,
+                                          "focal_max": 200, "at": "tele"}))["ok"]  # never moved
+        # "Sony": the ring turns towards tele away from the endstop
+        await ctrl.goto({"zoom": 60}, wait=True)
+        r = await dispatch(ctrl, {"cmd": "lens_save", "name": "Sony 70-200", "focal_min": 70,
+                                  "focal_max": 200, "at": "tele"})
+        assert r["ok"] and r["lens"]["wide"] == 0 and r["lens"]["tele"] == pytest.approx(60, abs=0.2)
+        st = ctrl.status()["lens"]
+        assert st["current"] == "Sony 70-200" and st["sign"] == 1 and st["focal"] == pytest.approx(200, abs=0.5)
+        assert ctrl.limits_of("zoom") == pytest.approx((0, 60), abs=0.2)
+        await jog_zoom(ctrl, 1.0)                     # zoom in: already at tele, stays
+        assert ctrl.position("zoom") <= 60.5
+        await jog_zoom(ctrl, -0.5)                    # zoom out: towards the endstop
+        assert ctrl.position("zoom") < 55
+        assert (await dispatch(ctrl, {"cmd": "zoom_focal", "focal": 135, "wait": True}))["ok"]
+        assert ctrl.position("zoom") == pytest.approx(30, abs=0.1)
+
+        # "Canon": the endstop end is tele, the ring turns towards wide
+        await dispatch(ctrl, {"cmd": "lens_select", "name": None})
+        assert ctrl.limits_of("zoom") == (0, 90)
+        await ctrl.goto({"zoom": 50}, wait=True)
+        r = await dispatch(ctrl, {"cmd": "lens_save", "name": "Canon 24-105", "focal_min": 24,
+                                  "focal_max": 105, "at": "wide"})
+        assert r["ok"] and r["lens"]["wide"] == pytest.approx(50, abs=0.2) and r["lens"]["tele"] == 0
+        assert ctrl.zoom_sign() == -1 and ctrl.status()["lens"]["focal"] == pytest.approx(24, abs=0.5)
+        before = ctrl.position("zoom")
+        await jog_zoom(ctrl, 0.5)                     # zoom in: the motor turns backwards
+        assert ctrl.position("zoom") < before - 3
+        f = ctrl.status()["lens"]["focal"]
+        assert 24 < f < 105
+        await jog_zoom(ctrl, 1.0, 1.0)                # zoom out to the wide end, no further
+        assert ctrl.position("zoom") <= 50.5
+        assert (await dispatch(ctrl, {"cmd": "zoom_focal", "focal": 105, "wait": True}))["ok"]
+        assert ctrl.position("zoom") == pytest.approx(0, abs=0.1)
+        assert ctrl.zoom_fraction() == pytest.approx(1.0)
+
+        saved = json.loads((tmp_path / "settings.json").read_text())
+        assert saved["lens"] == "Canon 24-105" and set(saved["lenses"]) == {"Sony 70-200", "Canon 24-105"}
+        r = await dispatch(ctrl, {"cmd": "lenses"})
+        assert [x["name"] for x in r["lens"]["list"]] == ["Canon 24-105", "Sony 70-200"]
+        assert (await dispatch(ctrl, {"cmd": "lens_delete", "name": "Canon 24-105"}))["ok"]
+        assert ctrl.lens is None and ctrl.zoom_sign() == 1
+        assert not (await dispatch(ctrl, {"cmd": "lens_select", "name": "nope"}))["ok"]
+    run(t, tmp_path)

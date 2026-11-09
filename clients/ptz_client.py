@@ -306,6 +306,24 @@ class PTZClient:
     async def level_clear(self) -> dict:
         return await self.call("level_clear")
 
+    # zoom lenses
+    async def lens_save(self, name: str, focal_min: float, focal_max: float, at: str) -> dict:
+        """Zoom homed then moved to the other end of the ring; at: "tele" or "wide"."""
+        return (await self.call("lens_save", name=name, focal_min=focal_min,
+                                focal_max=focal_max, at=at))["lens"]
+
+    async def lens_select(self, name: Optional[str]) -> dict:
+        return await self.call("lens_select", name=name)
+
+    async def lens_delete(self, name: str) -> dict:
+        return await self.call("lens_delete", name=name)
+
+    async def lenses(self) -> dict:
+        return (await self.call("lenses"))["lens"]
+
+    async def zoom_focal(self, focal: float, wait: bool = False) -> dict:
+        return await self.call("zoom_focal", focal=focal, wait=wait)
+
     async def shutdown(self, poweroff: bool = True) -> dict:
         """Rest position, motors off, files flushed, Pi powered off. Returns
         at once; follow status["shutdown"]["phase"]."""

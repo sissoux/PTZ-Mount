@@ -95,6 +95,10 @@ class MotionController:
         self.level_pitch = 0.0
         self.level_roll = 0.0
         self.level_marks: List[Tuple[float, float]] = []    # (pan, tilt) aimed level
+        # zoom lenses: name -> {"focal_min", "focal_max", "wide", "tele"}
+        # (wide / tele: zoom axis position at each end of the ring)
+        self.lenses: Dict[str, dict] = {}
+        self.lens: Optional[str] = None             # lens fitted (None: raw motor)
         # multi-car race: the car list (in the timing software's order), the
         # car followed, and the lap times of every car seen
         self.cars: Dict[int, dict] = {}
@@ -373,6 +377,13 @@ class MotionController:
             if (isinstance(c, dict) and isinstance(c.get("car"), int)
                     and 1 <= c["car"] <= CAR_NUMBER_MAX and len(self.cars) < CARS):
                 self.cars[c["car"]] = self._new_car(str(c.get("name") or "")[:24])
+        for name, d in (data.get("lenses") or {}).items():
+            if isinstance(d, dict) and all(isinstance(d.get(k), num) for k in
+                                           ("focal_min", "focal_max", "wide", "tele")):
+                self.lenses[str(name)] = {k: float(d[k]) for k in
+                                          ("focal_min", "focal_max", "wide", "tele")}
+        if data.get("lens") in self.lenses:
+            self.lens = data["lens"]
         lev = data.get("level") or {}
         self.level_on = bool(lev.get("enabled", False))
         for k in ("pitch", "roll"):
@@ -389,6 +400,7 @@ class MotionController:
                 "play_speed": self.play_speed, "axis_active": self.axis_active,
                 "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits},
                 "cars": [{"car": n, "name": c["name"]} for n, c in self.cars.items()],
+                "lenses": self.lenses, "lens": self.lens,
                 "level": {"enabled": self.level_on, "pitch": self.level_pitch,
                           "roll": self.level_roll, "marks": self.level_marks}}
         try:
@@ -464,6 +476,10 @@ class MotionController:
                 lo = max(lo, u["min"])
             if u["max"] is not None:
                 hi = min(hi, u["max"])
+        if name == "zoom" and self._lens() is not None:
+            w, t = self.zoom_ends()                  # the ring's end stops
+            lo, hi = max(lo, min(w, t)), min(hi, max(w, t))
+            hi = max(lo, hi)
         return lo, hi
 
     async def _apply_limits(self, names: Optional[Iterable[str]] = None) -> None:
@@ -556,6 +572,110 @@ class MotionController:
         pitch, roll = level_solve(self.level_marks)
         self.set_level(pitch, roll)
         return self.level_status()
+
+    # ================================================================ zoom lenses
+    def _lens(self) -> Optional[dict]:
+        return self.lenses.get(self.lens) if self.lens else None
+
+    def zoom_ends(self) -> Tuple[float, float]:
+        """Zoom axis positions of the wide and tele ends (no lens: the
+        configured travel, tele at the max end)."""
+        lens = self._lens()
+        if lens is not None:
+            return lens["wide"], lens["tele"]
+        ax = self.cfg.axes["zoom"]
+        return ax.position_min, ax.position_max
+
+    def zoom_sign(self) -> int:
+        """+1 when the motor's positive direction zooms in (towards tele)."""
+        if "zoom" not in self.cfg.axes:
+            return 1
+        w, t = self.zoom_ends()
+        return -1 if t < w else 1
+
+    def zoom_fraction(self) -> float:
+        """0 = wide end, 1 = tele end."""
+        w, t = self.zoom_ends()
+        return clamp((self.position("zoom") - w) / (t - w), 0.0, 1.0) if t != w else 0.0
+
+    async def zoom_to_fraction(self, frac: float, speed: float = 1.0, wait: bool = False) -> None:
+        w, t = self.zoom_ends()
+        await self.goto({"zoom": w + clamp(float(frac), 0.0, 1.0) * (t - w)},
+                        speed=speed, wait=wait)
+
+    def focal_now(self) -> Optional[float]:
+        """Focal length (mm) of the lens fitted, linear along the ring."""
+        lens = self._lens()
+        if lens is None or "zoom" not in self.state or not self.state["zoom"].homed:
+            return None
+        return lens["focal_min"] + self.zoom_fraction() * (lens["focal_max"] - lens["focal_min"])
+
+    async def zoom_to_focal(self, focal: float, speed: float = 1.0, wait: bool = False) -> None:
+        lens = self._lens()
+        if lens is None:
+            raise MotionError("no lens selected: choose the lens fitted first")
+        f = (float(focal) - lens["focal_min"]) / (lens["focal_max"] - lens["focal_min"])
+        await self.zoom_to_fraction(f, speed=speed, wait=wait)
+
+    async def lens_save(self, name: str, focal_min: float, focal_max: float,
+                        at: Optional[str] = None, wide: Optional[float] = None,
+                        tele: Optional[float] = None) -> dict:
+        """Store a lens and select it. Learning: the zoom was homed (the ring
+        at the endstop end) and moved to the other end of the ring; `at`
+        says which end it is now at ("tele" or "wide"). Or give the wide /
+        tele positions directly."""
+        name = str(name or "").strip()[:32]
+        if not name:
+            raise MotionError("the lens needs a name")
+        try:
+            fmin, fmax = float(focal_min), float(focal_max)
+        except (TypeError, ValueError):
+            raise MotionError("focal lengths must be numbers (mm)") from None
+        if not 0 < fmin < fmax:
+            raise MotionError("min focal must be above 0 and below max focal")
+        ax = self.axis("zoom")
+        if wide is None or tele is None:
+            if at not in ("tele", "wide"):
+                raise MotionError("at must be 'tele' or 'wide': the end the lens is at now")
+            if not self.state["zoom"].homed:
+                raise MotionError("home the zoom first")
+            here = self.position("zoom")
+            home = clamp(ax.position_endstop, ax.position_min, ax.position_max)
+            wide, tele = (home, here) if at == "tele" else (here, home)
+        wide, tele = float(wide), float(tele)
+        if abs(tele - wide) < 0.01 * (ax.position_max - ax.position_min):
+            raise MotionError("the ring hardly moved: move the zoom to the other end of "
+                              "the ring before saving")
+        self.lenses[name] = {"focal_min": fmin, "focal_max": fmax,
+                             "wide": round(wide, 3), "tele": round(tele, 3)}
+        log.info("lens '%s' %g-%g mm: wide at %.2f, tele at %.2f", name, fmin, fmax, wide, tele)
+        await self.lens_select(name)
+        return dict(self.lenses[name], name=name)
+
+    async def lens_select(self, name: Optional[str]) -> None:
+        """The lens fitted (None / "": none, raw motor direction and travel)."""
+        if name and name not in self.lenses:
+            raise MotionError(f"unknown lens '{name}'")
+        self.lens = name or None
+        self._save_settings()
+        if "zoom" in self.state:
+            await self._apply_limits(["zoom"])
+        log.info("lens: %s", self.lens or "none")
+
+    async def lens_delete(self, name: str) -> None:
+        if name not in self.lenses:
+            raise MotionError(f"unknown lens '{name}'")
+        del self.lenses[name]
+        if self.lens == name:
+            await self.lens_select(None)
+        else:
+            self._save_settings()
+
+    def lens_status(self) -> dict:
+        f = self.focal_now() if "zoom" in self.cfg.axes else None
+        return {"current": self.lens, "sign": self.zoom_sign(),
+                "focal": round(f, 1) if f is not None else None,
+                "list": [dict(v, name=k) for k, v in sorted(self.lenses.items())]}
 
     def level_clear(self) -> None:
         """Forget the marks and set the base back to level (0, 0)."""
@@ -666,6 +786,8 @@ class MotionController:
         if not self.ready or self.estopped:
             return []
         now = asyncio.get_running_loop().time()
+        if "zoom" in values and self.zoom_sign() < 0:    # +: zoom in (tele), any lens
+            values = {**values, "zoom": -float(values["zoom"])}
         shaped = {n: self._shape(v) for n, v in values.items()
                   if n in self.state and n not in self._homing and self.axis_active.get(n)}
         if scale is not None:
@@ -1772,6 +1894,7 @@ class MotionController:
             "recording": self.recorder.state(),
             "limits": self.limits_status(),
             "level": self.level_status(),
+            "lens": self.lens_status(),
             "cars": self.cars_status(),
             "tracking": {**self.tracking, "speed_eff": round(self._track_speed(), 3),
                          "current_lap": (round(self.current_lap_time(), 3)

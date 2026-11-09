@@ -161,6 +161,9 @@ abridged:
  "limits": {"enabled": true,
             "axes": {"pan": {"min": -35.0, "max": 38.0}, "tilt": {"min": null, "max": 10.0}, ...},
             "effective": {"pan": [-35.0, 38.0], "tilt": [-30.0, 10.0], "zoom": [0.0, 250.0]}},
+ "lens": {"current": "Sony 70-200", "sign": 1, "focal": 135.0,
+          "list": [{"name": "Sony 70-200", "focal_min": 70, "focal_max": 200,
+                    "wide": 0.0, "tele": 84.5}, ...]},
  "level": {"enabled": true, "pitch": 3.0, "roll": -1.5, "marks": [[-30.0, 3.1], [45.0, 1.0]],
            "spread": 75.0, "available": true, "world": {"pan": 12.4, "tilt": 8.0}},
  "shutdown": null,
@@ -188,6 +191,7 @@ abridged:
 | `axes.<n>.active` | The axis is in use (see `axis_active`) |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
 | `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
+| `lens` | Zoom lenses (5.12). `current`: the lens fitted (`null`: none). `sign`: +1 when the motor's positive direction zooms in, -1 when it zooms out. `focal`: current focal length in mm (`null` without a lens or before homing). Per lens: focal range and the zoom positions of its `wide` and `tele` ends. |
 | `level` | Base levelling (5.11). `world` is the current aim in the level frame (`null` until pan and tilt are homed). `spread` is the pan range covered by the marks. |
 | `shutdown` | `null`, or `{"phase", "message"}` once a shutdown is requested (5.10) |
 | `lock` | `null`, or `{"owner": <token>, "label": "<ip> (<client>)"}` |
@@ -489,6 +493,43 @@ roll of the picture itself: only the aim is corrected.
 {"cmd": "level_enable", "on": true, "id": 2}
 ```
 
+### 5.12 Zoom lenses
+
+The zoom drive turns the lens's zoom ring through a gear. Homing turns the
+ring until the endstop, so the endstop side is one end of the ring. Lenses
+do not all turn the same way: on some the endstop side is wide, on others
+it is tele. A lens profile stores which zoom position is wide and which is
+tele, so that:
+
+* a positive zoom jog (web rocker up / T, PgUp, gamepad, UDP
+  `{"cmd":"jog","zoom":1}`, VISCA tele) always **zooms in**, whatever the
+  lens;
+* the zoom stays between the ring's two ends (they become the zoom limits,
+  also enforced by the MCU);
+* VISCA direct zoom and the gamepad's zoom-position slider go from wide
+  (0) to tele (max);
+* the focal length is shown, and `zoom_focal` goes to a focal length. It
+  is assumed linear along the ring, so it is approximate.
+
+| Command | Parameters | Effect |
+|---|---|---|
+| `lens_save` | `name`, `focal_min`, `focal_max` (mm), `at` | Learning. The zoom was homed (the ring at the endstop end) and moved to the other end of the ring (`move_rel`, the web wizard's steps, or jog). `at`: the end it is at now, `"tele"` (zoomed in) or `"wide"`. The other end is the endstop position. Stores the lens and selects it (same name: replaced). Instead of `at`, `wide` and `tele` positions can be given directly. Reply: `lens` |
+| `lens_select` | `name` (`null` or `""`: none) | The lens fitted. Without a lens: motor direction and the configured travel. |
+| `lens_delete` | `name` | Forgets a lens |
+| `lenses` | - | Reply: `lens` (as in the status) |
+| `zoom_focal` | `focal` (mm), `speed`, `wait` | Zooms to this focal length (lens selected) |
+
+Before learning, select no lens: a lens's range would stop the zoom at its
+ends. The configured `position_max` of the zoom axis must cover the longest
+ring travel.
+
+```json
+{"cmd": "lens_select", "name": null}
+{"cmd": "home", "axes": ["zoom"], "wait": true}
+{"cmd": "move_rel", "zoom": 10, "wait": true}
+{"cmd": "lens_save", "name": "Canon 24-105", "focal_min": 24, "focal_max": 105, "at": "wide"}
+```
+
 ## 6. Blocking mode for live events
 
 When a program holds the lock:
@@ -596,7 +637,8 @@ Supported:
 * pan/tilt drive and stop, and absolute pan/tilt in 0.1° units;
 * home (moves to 0/0) and reset (runs homing);
 * zoom stop, tele and wide (fixed and variable speed), and direct zoom
-  (0x0000 to 0x4000 maps to the full zoom range);
+  (0x0000 to 0x4000 maps to the full zoom range, wide to tele of the lens
+  selected, see 5.12);
 * preset reset, set and recall;
 * pan/tilt and zoom position inquiries.
 
@@ -642,6 +684,7 @@ asyncio.run(main())
 | `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)` | |
 | `limit_set(axis, side, value=None)`, `limit_clear(axis=None, side=None)`, `limits_enable(on)` | Soft limits |
 | `level_set(pitch=None, roll=None)`, `level_enable(on)`, `level_mark()`, `level_clear()` | Base levelling (5.11) |
+| `lens_save(name, focal_min, focal_max, at)`, `lens_select(name)`, `lens_delete(name)`, `lenses()`, `zoom_focal(focal, wait=False)` | Zoom lenses (5.12) |
 | `shutdown(poweroff=True)` | Rest, motors off, power off (5.10) |
 | `track_arm(name, wait=True)`, `track_go()`, `wait_lap()`, `track_set(**settings)`, `track_abort()` | Race tracking |
 | `await_car(car, track=None)`, `lap(car=None, position=None)`, `follow_leader(on=True)`, `cars_set(cars)`, `cars()`, `cars_flush()`, `car_name(car, name)`, `cars_reset()` | Several cars (5.6.1) |

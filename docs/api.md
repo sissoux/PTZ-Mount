@@ -161,6 +161,8 @@ abridged:
  "limits": {"enabled": true,
             "axes": {"pan": {"min": -35.0, "max": 38.0}, "tilt": {"min": null, "max": 10.0}, ...},
             "effective": {"pan": [-35.0, 38.0], "tilt": [-30.0, 10.0], "zoom": [0.0, 250.0]}},
+ "level": {"enabled": true, "pitch": 3.0, "roll": -1.5, "marks": [[-30.0, 3.1], [45.0, 1.0]],
+           "spread": 75.0, "available": true, "world": {"pan": 12.4, "tilt": 8.0}},
  "shutdown": null,
  "lock": null, "sources": [], "playback": null, "recording": {"active": false},
  "tracking": {"phase": "idle", "track": null, "lap_time": null, "runs": 0, ...}}
@@ -183,6 +185,7 @@ abridged:
 | `axes.<n>.active` | The axis is in use (see `axis_active`) |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
 | `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
+| `level` | Base levelling (5.11). `world` is the current aim in the level frame (`null` until pan and tilt are homed). `spread` is the pan range covered by the marks. |
 | `shutdown` | `null`, or `{"phase", "message"}` once a shutdown is requested (5.10) |
 | `lock` | `null`, or `{"owner": <token>, "label": "<ip> (<client>)"}` |
 | `sources` | UDP / VISCA senders seen in the last 10 s |
@@ -382,6 +385,37 @@ everything is written, and the mount can be unplugged. A stop or E-stop
 during the rest move cancels the move only: the motors are still turned off.
 A second request is refused unless the first one `"failed"`.
 
+### 5.11 Base levelling
+
+When the mount stands at an angle, a pan sweep in the mount's own frame
+rises on one side and dips on the other. With levelling enabled, every jog
+(web joystick, keyboard, gamepad, UDP, VISCA drive) is done in a level
+frame: a pan jog keeps the aim at the same height above the horizon, the
+tilt motor following as needed; a tilt jog changes that height. If one axis
+reaches a limit, both stop together (the aim stays on the level path).
+
+The base attitude is given in tilt units, with the mount's own tilt sign:
+
+* `pitch`: the tilt reading that looks level when the head is at pan 0
+* `roll`: the tilt reading that looks level when the head is at pan +90
+
+| Command | Parameters | Effect |
+|---|---|---|
+| `level_set` | `pitch`, `roll` (either or both, -45..45) | Sets the base attitude |
+| `level_enable` | `on` (bool) | Levelled jog on / off |
+| `level_mark` | | The camera looks level right now (its electronic level at 0, or the horizon centred): adds a mark at the current pan / tilt and recomputes `pitch` / `roll` from all the marks. Two marks at least 30° apart in pan are needed; with one, the base is assumed to lean along that pan. A new mark replaces one taken within 5° of pan. Reply: `level` (as in the status). |
+| `level_clear` | | Forgets the marks; `pitch` = `roll` = 0 |
+
+Only jogging is corrected. Moves, presets, replays and tracking use mount
+positions, so they go back exactly where they were taken. The model assumes
+tilt 0 is perpendicular to the pan axis. A pan / tilt head cannot cancel the
+roll of the picture itself: only the aim is corrected.
+
+```json
+{"cmd": "level_mark", "id": 1}
+{"cmd": "level_enable", "on": true, "id": 2}
+```
+
 ## 6. Blocking mode for live events
 
 When a program holds the lock:
@@ -534,6 +568,7 @@ asyncio.run(main())
 | `jog(**values)`, `JogStream(client, rate=25)` | Jog: one frame, or a continuous stream |
 | `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)` | |
 | `limit_set(axis, side, value=None)`, `limit_clear(axis=None, side=None)`, `limits_enable(on)` | Soft limits |
+| `level_set(pitch=None, roll=None)`, `level_enable(on)`, `level_mark()`, `level_clear()` | Base levelling (5.11) |
 | `shutdown(poweroff=True)` | Rest, motors off, power off (5.10) |
 | `track_arm(name, wait=True)`, `track_go()`, `wait_lap()`, `track_set(**settings)`, `track_abort()` | Race tracking |
 | `play(name, speed, loop, wait)`, `play_stop()` | Replay |

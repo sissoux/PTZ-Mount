@@ -291,6 +291,21 @@ class PTZClient:
     async def limits_enable(self, on: bool) -> dict:
         return await self.call("limits_enable", on=on)
 
+    # base levelling (mount standing at an angle)
+    async def level_set(self, pitch: Optional[float] = None, roll: Optional[float] = None) -> dict:
+        params = {k: v for k, v in (("pitch", pitch), ("roll", roll)) if v is not None}
+        return await self.call("level_set", **params)
+
+    async def level_enable(self, on: bool) -> dict:
+        return await self.call("level_enable", on=on)
+
+    async def level_mark(self) -> dict:
+        """The camera looks level now: returns the updated level state."""
+        return (await self.call("level_mark"))["level"]
+
+    async def level_clear(self) -> dict:
+        return await self.call("level_clear")
+
     async def shutdown(self, poweroff: bool = True) -> dict:
         """Rest position, motors off, files flushed, Pi powered off. Returns
         at once; follow status["shutdown"]["phase"]."""

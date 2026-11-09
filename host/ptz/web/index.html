@@ -105,6 +105,26 @@
           (jog, presets, replays, tracking, scripts) stops at the limits.</p>
       </section>
 
+      <section class="card level-card" id="level-card">
+        <h2>Base level</h2>
+        <label class="lim-on"><input id="level-on" type="checkbox"> Level jog: a pan sweep keeps the same height above the horizon</label>
+        <div class="level-grid">
+          <label for="level-pitch" title="Tilt reading that looks level with the head at pan 0">Level tilt at pan 0</label>
+          <input id="level-pitch" type="number" step="0.1" min="-45" max="45" class="num">
+          <label for="level-roll" title="Tilt reading that looks level with the head at pan +90">Level tilt at pan +90</label>
+          <input id="level-roll" type="number" step="0.1" min="-45" max="45" class="num">
+        </div>
+        <div class="row buttons">
+          <button id="btn-level-mark" title="The camera looks level right now (camera level at 0, or the horizon centred)">Mark level here</button>
+          <button id="btn-level-clear" class="ghost" title="Forget the marks: base level again">Clear</button>
+          <span id="level-info" class="muted"></span>
+        </div>
+        <p class="hint">Mount standing at an angle: aim the camera level (its electronic level
+          at 0, or the horizon) and press Mark, at two pan angles at least 30° apart. Or type
+          the tilt that looks level at pan 0 and pan +90. Only jogging is corrected;
+          presets and replays go back to exactly where they were taken.</p>
+      </section>
+
       <section class="card pad-card">
         <h2>Controller (gamepad / joystick)</h2>
         <div id="gp-warning" class="result-bad hidden"></div>

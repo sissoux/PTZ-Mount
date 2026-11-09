@@ -18,6 +18,11 @@ Soft limits (learned)
     {"cmd": "limit_set", "axis": "tilt", "side": "max"}   current position (or "value")
     {"cmd": "limit_clear", "axis": "tilt", "side": "max"}  (both: omit side; all: omit axis)
     {"cmd": "limits_enable", "on": true}
+Base levelling (mount standing at an angle: jog pan / tilt in a level frame)
+    {"cmd": "level_set", "pitch": 3.0, "roll": -1.5}   tilt that looks level at pan 0 / pan 90
+    {"cmd": "level_enable", "on": true}
+    {"cmd": "level_mark"}     the camera looks level now: learn pitch / roll from the marks
+    {"cmd": "level_clear"}    forget the marks, pitch = roll = 0
 Shutdown
     {"cmd": "shutdown"}        rest position, motors off, files flushed, Pi powered off
     {"cmd": "shutdown", "poweroff": false}   same, but the Pi stays on (safe to unplug)
@@ -161,6 +166,15 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             await ctrl.clear_user_limit(msg.get("axis"), msg.get("side"))
         elif cmd == "limits_enable":
             await ctrl.enable_user_limits(bool(msg.get("on", True)))
+        # ------------------------------------------------ base levelling
+        elif cmd == "level_set":
+            ctrl.set_level(msg.get("pitch"), msg.get("roll"))
+        elif cmd == "level_enable":
+            ctrl.enable_level(bool(msg.get("on", True)))
+        elif cmd == "level_mark":
+            reply["level"] = ctrl.level_mark()
+        elif cmd == "level_clear":
+            ctrl.level_clear()
         # ------------------------------------------------ shutdown
         elif cmd == "shutdown":
             ctrl.claim_shutdown()

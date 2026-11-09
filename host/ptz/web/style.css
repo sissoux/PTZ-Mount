@@ -237,3 +237,9 @@ body.editing { overflow: hidden; }
 .sd-steps li.done { color: #2fb66f; }
 .sd-steps li.done::after { content: " ✓"; }
 .sd-steps li.skip { text-decoration: line-through; }
+
+/* ---- base level ---- */
+.level-grid { display: grid; grid-template-columns: max-content 90px; gap: 6px 12px; align-items: center;
+              margin: 8px 0; }
+.level-grid input { width: 90px; }
+#level-info { font-size: 12px; }

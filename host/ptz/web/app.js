@@ -223,6 +223,32 @@ function renderLimits(lim, axes) {
   }
 }
 $("limits-on").onchange = () => send({ cmd: "limits_enable", on: $("limits-on").checked, id: "le" });
+
+// ------------------------------------------------------------ base level
+function renderLevel(lv) {
+  $("level-card").classList.toggle("hidden", !lv.available);
+  if (document.activeElement !== $("level-on")) $("level-on").checked = lv.enabled;
+  for (const k of ["pitch", "roll"]) {
+    const el = $(`level-${k}`);
+    if (document.activeElement !== el) el.value = lv[k].toFixed(2);
+  }
+  const n = lv.marks.length;
+  const marks = n === 0 ? "no marks" : n === 1 ? "1 mark (add one 30°+ away in pan)"
+    : `${n} marks over ${lv.spread.toFixed(0)}° of pan` + (lv.spread < 30 ? " (spread them more)" : "");
+  const w = lv.world ? ` · level aim: pan ${lv.world.pan.toFixed(1)}°, tilt ${lv.world.tilt.toFixed(1)}°` : "";
+  $("level-info").textContent = marks + w;
+}
+$("level-on").onchange = () => send({ cmd: "level_enable", on: $("level-on").checked, id: "lv" });
+for (const k of ["pitch", "roll"]) {
+  $(`level-${k}`).onchange = (e) => {
+    const v = parseFloat(e.target.value);
+    if (Number.isFinite(v)) send({ cmd: "level_set", [k]: v, id: "lv" });
+  };
+}
+$("btn-level-mark").onclick = () => send({ cmd: "level_mark", id: "lv" });
+$("btn-level-clear").onclick = () => {
+  if (confirm("Forget the level marks and set the base back to level (0 / 0)?")) send({ cmd: "level_clear", id: "lv" });
+};
 $("btn-track-edit").onclick = () => {
   const name = $("track-select").value;
   if (name) openEditor(name); else showError("learn a track first");
@@ -281,6 +307,7 @@ function renderStatus(s) {
   }
   if (config && s.settings) renderSettings(s.settings);
   if (config && s.limits) renderLimits(s.limits, s.axes);
+  if (s.level) renderLevel(s.level);
   renderShutdown(s.shutdown);
   renderLock(s.lock);
   renderClients();

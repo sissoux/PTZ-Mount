@@ -31,6 +31,7 @@ from . import protocol as P
 from . import tmc2209
 from .config import AxisConfig, PtzConfig
 from .fsutil import atomic_write_json, sync_all
+from .level import Level, solve as level_solve, spread as level_spread
 from .mcu import McuError, McuLink
 from .presets import PresetStore
 from .recorder import Recorder
@@ -85,6 +86,11 @@ class MotionController:
         self.user_limits: Dict[str, Dict[str, Optional[float]]] = {
             a.name: {"min": None, "max": None} for a in self.axes}
         self.user_limits_on = False
+        # base levelling: jog pan / tilt in a level frame (mount at an angle)
+        self.level_on = False
+        self.level_pitch = 0.0
+        self.level_roll = 0.0
+        self.level_marks: List[Tuple[float, float]] = []    # (pan, tilt) aimed level
         self.lock_owner: Optional[str] = None
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
@@ -93,6 +99,8 @@ class MotionController:
         self.play_loop = False
         self._settings_path = os.path.join(cfg.server.state_dir, "settings.json")
         self._load_settings()
+        self._level = Level(self.level_pitch, self.level_roll)
+        self._level_hold: Optional[float] = None    # level tilt kept during a pan jog
         self.recorder = Recorder(os.path.join(cfg.server.state_dir, "recordings"),
                                  self._homed_positions, time.monotonic)
         self.playback: Optional[dict] = None
@@ -345,13 +353,23 @@ class MotionController:
         for k in ("smoothing", "play_speed"):
             if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
+        lev = data.get("level") or {}
+        self.level_on = bool(lev.get("enabled", False))
+        for k in ("pitch", "roll"):
+            if isinstance(lev.get(k), num) and abs(lev[k]) <= 45:
+                setattr(self, "level_" + k, float(lev[k]))
+        self.level_marks = [(float(m[0]), float(m[1])) for m in (lev.get("marks") or [])
+                            if isinstance(m, list) and len(m) == 2
+                            and all(isinstance(x, num) for x in m)]
 
     def _save_settings(self) -> None:
         data = {"advanced": self.advanced, "speed_all": self.speed_all,
                 "accel_all": self.accel_all, "speed_axis": self.speed_axis,
                 "accel_axis": self.accel_axis, "smoothing": self.smoothing,
                 "play_speed": self.play_speed, "axis_active": self.axis_active,
-                "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits}}
+                "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits},
+                "level": {"enabled": self.level_on, "pitch": self.level_pitch,
+                          "roll": self.level_roll, "marks": self.level_marks}}
         try:
             atomic_write_json(self._settings_path, data)
         except OSError as e:
@@ -481,6 +499,67 @@ class MotionController:
         return {"enabled": self.user_limits_on,
                 "axes": {n: dict(v) for n, v in self.user_limits.items()},
                 "effective": {n: list(self.limits_of(n)) for n in self.user_limits}}
+
+    # ================================================================ base levelling
+    def set_level(self, pitch: Optional[float] = None, roll: Optional[float] = None) -> None:
+        """Base attitude, in tilt units: tilt that looks level at pan 0
+        (pitch) and at pan +90 (roll). See level.py."""
+        for k, v in (("pitch", pitch), ("roll", roll)):
+            if v is not None:
+                v = float(v)
+                if not -45.0 <= v <= 45.0:
+                    raise MotionError(f"level {k} must be within -45..45")
+                setattr(self, "level_" + k, round(v, 3))
+        self._level = Level(self.level_pitch, self.level_roll)
+        self._level_hold = None
+        self._save_settings()
+        log.info("base level: pitch %.2f, roll %.2f", self.level_pitch, self.level_roll)
+
+    def enable_level(self, on: bool) -> None:
+        self.level_on = bool(on)
+        self._level_hold = None
+        self._save_settings()
+        log.info("base levelling %s", "ON" if on else "off")
+
+    def level_mark(self) -> dict:
+        """The camera looks level right now (camera's electronic level, or
+        aimed at the horizon): add a mark and recompute pitch / roll."""
+        for n in ("pan", "tilt"):
+            if n not in self.state:
+                raise MotionError("levelling needs a pan and a tilt axis")
+            if not self.state[n].homed:
+                raise MotionError(f"axis '{n}' is not homed")
+        p, t = round(self.position("pan"), 3), round(self.position("tilt"), 3)
+        # a new mark replaces any older one taken at nearly the same pan
+        self.level_marks = [m for m in self.level_marks if abs(m[0] - p) > 5.0][-7:] + [(p, t)]
+        pitch, roll = level_solve(self.level_marks)
+        self.set_level(pitch, roll)
+        return self.level_status()
+
+    def level_clear(self) -> None:
+        """Forget the marks and set the base back to level (0, 0)."""
+        self.level_marks = []
+        self.set_level(0.0, 0.0)
+
+    def level_status(self) -> dict:
+        out = {"enabled": self.level_on, "pitch": self.level_pitch, "roll": self.level_roll,
+               "marks": [list(m) for m in self.level_marks],
+               "spread": round(level_spread(self.level_marks), 1),
+               "available": "pan" in self.state and "tilt" in self.state, "world": None}
+        if out["available"] and self.state["pan"].homed and self.state["tilt"].homed:
+            P_, T_ = self._level.to_world(self.position("pan"), self.position("tilt"))
+            out["world"] = {"pan": round(P_, 3), "tilt": round(T_, 3)}
+        return out
+
+    def _level_axes(self, traj) -> bool:
+        """Pan and tilt jog in the level frame this tick?"""
+        if not self.level_on or self._level.identity:
+            return False
+        for n in ("pan", "tilt"):
+            if (n not in self.state or not self.state[n].homed or not self.axis_active[n]
+                    or n in self._homing or (traj is not None and n in traj.axes)):
+                return False
+        return True
 
     # ================================================================ axis on / off
     async def set_axis_active(self, name: str, on: bool) -> None:
@@ -660,12 +739,15 @@ class MotionController:
 
         timeout = self.cfg.motion.jog_timeout
         smooth = self._smooth_time()
+        mixed = self._level_axes(traj)
+        world: Dict[str, float] = {}
         for ax in self.axes:
             name = ax.name
             if (traj is not None and name in traj.axes) or name in self._homing:
                 continue
             st, sh = self.state[name], self._shapers[name]
-            if not st.jog_active and sh.v == 0.0:
+            mix = mixed and name in ("pan", "tilt")
+            if not st.jog_active and sh.v == 0.0 and not mix:
                 continue
             if st.jog_active and now - st.jog_time > timeout:
                 st.jog_active, st.jog_value = False, 0.0
@@ -673,6 +755,9 @@ class MotionController:
             jerk = amax / smooth if smooth > 1e-3 else math.inf
             target = st.jog_value * self.speed_of(name)
             st.braking = False
+            if mix:                                   # level frame rate, mixed below
+                world[name] = sh.step(target, amax, jerk, dt)
+                continue
             if st.homed:                              # ease into the soft limits
                 pos = self.position(name)
                 lo, hi = self.limits_of(name)
@@ -685,9 +770,58 @@ class MotionController:
             self._cmd_vel[name] = v
             mask |= 1 << ax.index
             vels[ax.index] = v * ax.steps_per_unit
+        if mixed:
+            mask |= self._level_tick(world, smooth, vels, now, dt)
+        else:
+            self._level_hold = None
         if mask:
             self.link.send("SET_VELOCITY", axis_mask=mask, v0=vels[0], v1=vels[1],
                            v2=vels[2], v3=vels[3])
+
+    def _level_tick(self, world: Dict[str, float], smooth: float, vels: List[float],
+                    now: float, dt: float) -> int:
+        """Level-frame jog rates -> pan / tilt motor velocities. While only
+        pan is jogged, the level tilt is held where it was."""
+        wp, wt = world.get("pan", 0.0), world.get("tilt", 0.0)
+        # where the head will be while this command runs (the measure is a
+        # few ms old; at speed that would bend the level path)
+        ahead = clamp(now - self._last_status, 0.0, 0.1) + FEEDBACK_LATENCY + 0.5 * dt
+        p = self.position("pan") + self._cmd_vel["pan"] * ahead
+        t = self.position("tilt") + self._cmd_vel["tilt"] * ahead
+        if wp == 0.0 or wt != 0.0:
+            self._level_hold = None
+        elif self._level_hold is None:
+            self._level_hold = self._level.to_world(p, t)[1]
+        if wp == 0.0 and wt == 0.0:
+            vm = {"pan": 0.0, "tilt": 0.0}
+        else:
+            vp, vt = self._level.mount_rates(p, t, wp, wt, self._level_hold)
+            vm = {"pan": vp, "tilt": vt}
+        # same caps as a plain jog (axis maximum, easing into the soft
+        # limits), applied to both axes together: the aim keeps to the level
+        # path, it stops at a limit instead of leaving it
+        k = 1.0
+        for name, v in vm.items():
+            st = self.state[name]
+            pos = self.position(name)
+            lo, hi = self.limits_of(name)
+            amax = self.accel_of(name)
+            cap = min(self.cfg.axes[name].max_velocity,
+                      braking_speed(hi - pos, amax, smooth) if v > 0
+                      else braking_speed(pos - lo, amax, smooth))
+            st.braking = abs(v) > cap and cap < self.cfg.axes[name].max_velocity
+            if abs(v) > cap:
+                k = min(k, cap / abs(v))
+        mask = 0
+        for name, v in vm.items():
+            ax = self.cfg.axes[name]
+            v *= k
+            if v == 0.0 and self._cmd_vel[name] == 0.0:
+                continue                      # idle: nothing to send
+            self._cmd_vel[name] = v
+            mask |= 1 << ax.index
+            vels[ax.index] = v * ax.steps_per_unit
+        return mask
 
     # ================================================================ trajectories
     def _start_traj(self, traj, kind: str, replace: bool = False) -> asyncio.Future:
@@ -1374,6 +1508,7 @@ class MotionController:
             "playback": playback,
             "recording": self.recorder.state(),
             "limits": self.limits_status(),
+            "level": self.level_status(),
             "tracking": {**self.tracking, "speed_eff": round(self._track_speed(), 3),
                          "current_lap": (round(self.current_lap_time(), 3)
                                          if self.current_lap_time() else None),

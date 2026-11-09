@@ -170,6 +170,14 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   With *Enabled* ticked, nothing can drive the head past them: jog, presets,
   replays, tracking and scripts all stop at the limits. Untick it to use the
   whole travel again; the learned values are kept on the Pi.
+* **Base level** (middle column), for a mount standing at an angle: aim the
+  camera level (its electronic level at 0, or the horizon centred) and press
+  *Mark level here*, at two pan angles at least 30° apart, then tick *Level
+  jog*. Pan jogs then keep the same height above the horizon: the tilt
+  follows on its own. The two values can also be typed: the tilt that looks
+  level at pan 0 and at pan +90. Only jogging is corrected (presets and
+  replays are exact mount positions); the picture's own roll cannot be
+  removed by a pan / tilt head.
 * **⏻ Shutdown** (top right): the head goes to its rest position (pan 0°,
   tilt at its max end, +32° here; `shutdown_position` per axis in the configuration), the
   motors are turned off, every file is flushed to the SD card and the Pi

@@ -787,3 +787,51 @@ def test_settings_file_written_atomically(tmp_path):
         assert data["user_limits"]["enabled"] is True
         assert not (tmp_path / "settings.json.tmp").exists()
     run(t, tmp_path)
+
+
+def test_base_levelling_keeps_pan_jog_flat(tmp_path):
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": -40, "tilt": 5}, wait=True)
+        await asyncio.sleep(0.05)
+        # learn the base: camera "level" at two pans (simulated base pitch 4, roll -3)
+        from ptz.level import Level
+        truth = Level(4.0, -3.0)
+        for p in (-40, 50):
+            await ctrl.goto({"pan": p, "tilt": truth.to_mount(p, 0.0)[1]}, wait=True)
+            await asyncio.sleep(0.05)
+            r = await dispatch(ctrl, {"cmd": "level_mark"})
+            assert r["ok"]
+        lv = ctrl.status()["level"]
+        assert lv["pitch"] == pytest.approx(4.0, abs=0.1) and lv["roll"] == pytest.approx(-3.0, abs=0.1)
+        assert (await dispatch(ctrl, {"cmd": "level_enable", "on": True}))["ok"]
+        await ctrl.goto({"pan": -60, "tilt": truth.to_mount(-60, 10.0)[1]}, wait=True)
+        await asyncio.sleep(0.05)
+        e0 = ctrl.status()["level"]["world"]["tilt"]
+        tilts, elev = [], []
+        for _ in range(40):                                  # pan only, up to the limit
+            ctrl.jog({"pan": 1.0})
+            await asyncio.sleep(0.03)
+            tilts.append(ctrl.position("tilt"))
+            elev.append(ctrl.status()["level"]["world"]["tilt"])
+        await asyncio.sleep(0.8)
+        assert ctrl.position("pan") > 40
+        assert max(tilts) - min(tilts) > 4                   # the motor tilt did follow
+        assert max(abs(e - e0) for e in elev) < 0.2          # the aim stayed level
+        # pan ran into its end of travel: tilt stopped with it, still level
+        assert ctrl.status()["level"]["world"]["tilt"] == pytest.approx(e0, abs=0.2)
+        assert ctrl.state["tilt"].vel == 0 and ctrl.state["pan"].vel == 0
+        # off: plain mount jog, tilt untouched
+        await dispatch(ctrl, {"cmd": "level_enable", "on": False})
+        t0 = ctrl.position("tilt")
+        for _ in range(10):
+            ctrl.jog({"pan": -1.0})
+            await asyncio.sleep(0.03)
+        await asyncio.sleep(0.6)
+        assert ctrl.position("tilt") == pytest.approx(t0, abs=0.01)
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["level"]["pitch"] == pytest.approx(4.0, abs=0.1)
+        assert not (await dispatch(ctrl, {"cmd": "level_set", "pitch": 60}))["ok"]
+        await dispatch(ctrl, {"cmd": "level_clear"})
+        assert ctrl.status()["level"]["marks"] == [] and ctrl.level_pitch == 0
+    run(t, tmp_path)

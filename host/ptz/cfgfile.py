@@ -15,6 +15,7 @@ import time
 from typing import List, Optional, Tuple
 
 from .config import ConfigError, PtzConfig, load
+from .fsutil import atomic_write_text
 
 MAX_BACKUPS = 30
 
@@ -79,10 +80,7 @@ class ConfigFiles:
         if cfg is None:
             raise ConfigError(error)
         self._backup()
-        tmp = self.override + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text if text.endswith("\n") else text + "\n")
-        os.replace(tmp, self.override)
+        atomic_write_text(self.override, text if text.endswith("\n") else text + "\n")
         return cfg.warnings
 
     def reset(self) -> None:
@@ -96,9 +94,8 @@ class ConfigFiles:
             return
         os.makedirs(self.backup_dir, exist_ok=True)
         name = time.strftime("ptz-%Y%m%d-%H%M%S.cfg")
-        with open(self.active, encoding="utf-8") as src, \
-                open(os.path.join(self.backup_dir, name), "w", encoding="utf-8") as dst:
-            dst.write(src.read())
+        with open(self.active, encoding="utf-8") as src:
+            atomic_write_text(os.path.join(self.backup_dir, name), src.read())
         for old in self.backups()[MAX_BACKUPS:]:
             os.remove(os.path.join(self.backup_dir, old))
 

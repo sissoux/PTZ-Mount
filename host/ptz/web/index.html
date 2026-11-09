@@ -20,10 +20,24 @@
     </div>
     <button id="btn-lock" class="small lock" title="Blocking mode: only you can move the head">🔒 Take control</button>
     <a class="btn small" href="/settings" title="Edit the configuration file">⚙ Config</a>
+    <button id="btn-shutdown" class="small" title="Rest the head, turn the motors off and shut the Pi down">⏻ Shutdown</button>
     <label class="debug-toggle"><input id="debug-mode" type="checkbox"> Debug</label>
     <button id="btn-estop" class="estop">E-STOP</button>
   </header>
   <div id="lock-banner" class="lock-banner hidden"></div>
+  <div id="shutdown" class="shutdown hidden">
+    <div class="sd-box">
+      <div id="sd-icon" class="sd-icon">⏻</div>
+      <h2 id="sd-title">Shutting down</h2>
+      <p id="sd-msg"></p>
+      <ol class="sd-steps">
+        <li id="sd-s-parking">Head to the rest position</li>
+        <li id="sd-s-motors_off">Motors off, files saved</li>
+        <li id="sd-s-powering_off">Raspberry Pi powering off</li>
+      </ol>
+      <p id="sd-hint" class="muted"></p>
+    </div>
+  </div>
   <div id="config-banner" class="lock-banner hidden"></div>
 
   <main class="layout">

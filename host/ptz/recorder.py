@@ -22,6 +22,7 @@ import re
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
+from .fsutil import atomic_write_json, atomic_write_text
 from .track import TrackError, average_laps, split_laps
 
 RATE_HZ = 20.0
@@ -190,12 +191,7 @@ class Recorder:
         data = {"name": name, "mode": data.get("mode", "continuous"),
                 "created": time.time(), "duration": round(data["points"][-1]["t"], 3),
                 **extra, "points": data["points"]}
-        os.makedirs(self.dir, exist_ok=True)
-        path = self._path(name)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+        atomic_write_json(self._path(name), data)
         return self._summary(data)
 
     def import_data(self, data, limits: Dict[str, tuple], name: str = "") -> dict:
@@ -222,9 +218,8 @@ class Recorder:
             os.makedirs(bdir, exist_ok=True)
             stem = _safe_name(name)
             dst_name = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.json"
-            with open(path, encoding="utf-8") as src, open(
-                    os.path.join(bdir, dst_name), "w", encoding="utf-8") as dst:
-                dst.write(src.read())
+            with open(path, encoding="utf-8") as src:
+                atomic_write_text(os.path.join(bdir, dst_name), src.read())
             old = sorted(f for f in os.listdir(bdir) if f.startswith(stem + "-"))
             for f in old[:-10]:                     # keep the last 10 per recording
                 os.remove(os.path.join(bdir, f))
@@ -323,8 +318,7 @@ class Recorder:
         dst = self._path(new)
         if os.path.exists(dst):
             raise RecorderError(f"'{new}' already exists")
-        with open(dst, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        atomic_write_json(dst, data)
         os.remove(self._path(name))
 
     def list(self) -> List[dict]:

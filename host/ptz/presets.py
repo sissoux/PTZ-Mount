@@ -5,6 +5,8 @@ import json
 import os
 from typing import Dict, Optional
 
+from .fsutil import atomic_write_json
+
 
 class PresetStore:
     def __init__(self, path: str):
@@ -20,11 +22,7 @@ class PresetStore:
             self._data = {}
 
     def _save(self) -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2)
-        os.replace(tmp, self.path)
+        atomic_write_json(self.path, self._data, indent=2)
 
     def get(self, pid) -> Optional[dict]:
         p = self._data.get(str(pid))

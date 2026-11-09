@@ -30,6 +30,7 @@ from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
 from . import protocol as P
 from . import tmc2209
 from .config import AxisConfig, PtzConfig
+from .fsutil import atomic_write_json, sync_all
 from .mcu import McuError, McuLink
 from .presets import PresetStore
 from .recorder import Recorder
@@ -107,6 +108,7 @@ class MotionController:
         self._go: Optional[asyncio.Event] = None
         self._traj = None                     # MoveTrajectory | PlaybackTrajectory
         self._traj_kind = ""
+        self.shutdown_state: Optional[dict] = None    # {"phase", "message"} once requested
         self._traj_future: Optional[asyncio.Future] = None
         self._shapers = {a.name: VelocityShaper() for a in self.axes}
         self._cmd_vel = {a.name: 0.0 for a in self.axes}       # last streamed, units/s
@@ -351,9 +353,7 @@ class MotionController:
                 "play_speed": self.play_speed, "axis_active": self.axis_active,
                 "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits}}
         try:
-            os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
-            with open(self._settings_path, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+            atomic_write_json(self._settings_path, data)
         except OSError as e:
             log.warning("cannot save settings: %s", e)
 
@@ -892,6 +892,85 @@ class MotionController:
         await self.link.request("ENABLE", axis_mask=mask, enable_mask=mask if on else 0)
 
     # ================================================================ homing
+    # ================================================================ shutdown
+    # Command that powers the Pi off. Needs the sudoers rule installed by
+    # deploy/setup-remote.sh. Fixed here on purpose (not in the editable
+    # config: the web config page must not be able to run commands).
+    POWEROFF_CMD = ("sudo", "-n", "/usr/bin/systemctl", "poweroff")
+
+    def shutdown_targets(self) -> Dict[str, float]:
+        """Resting position of every homed, active axis that has one."""
+        out = {}
+        for ax in self.axes:
+            sd = ax.shutdown_position
+            if sd is None or not self.axis_active[ax.name] or not self.state[ax.name].homed:
+                continue
+            lo, hi = self.limits_of(ax.name)
+            out[ax.name] = lo if sd == "min" else hi if sd == "max" else clamp(float(sd), lo, hi)
+        return out
+
+    def _sd_phase(self, phase: str, message: str) -> None:
+        self.shutdown_state = {"phase": phase, "message": message}
+        log.warning("shutdown: %s", message)
+
+    def claim_shutdown(self) -> None:
+        """Synchronous part of a shutdown request: only one at a time."""
+        if self.shutdown_state is not None and self.shutdown_state["phase"] != "failed":
+            raise MotionError("shutdown already in progress")
+        self._sd_phase("parking", "moving to the rest position")
+
+    async def shutdown(self, poweroff: bool = True) -> None:
+        """Park the head, turn the motors off, flush every file to the SD
+        card, then power the Pi off. If the Pi cannot be powered off, the
+        state ends as "safe": nothing is written any more and the mount can
+        be unplugged."""
+        self.claim_shutdown()
+        await self.run_shutdown(poweroff)
+
+    async def run_shutdown(self, poweroff: bool = True) -> None:
+        """The shutdown sequence, after claim_shutdown()."""
+        try:
+            self._cancel_motion()
+            if self.recorder.active:
+                self.recorder.cancel()
+            targets = self.shutdown_targets() if self.ready and not self.estopped else {}
+            if targets:
+                log.info("shutdown: resting at %s",
+                         ", ".join(f"{n} {v:g}" for n, v in targets.items()))
+                traj = self._plan_move(targets)
+                if traj is not None:
+                    try:
+                        await asyncio.wait_for(self._start_traj(traj, "park", replace=True), 60)
+                    except (asyncio.TimeoutError, MotionError) as e:
+                        log.warning("shutdown: rest move incomplete (%s)", e)
+            self._sd_phase("motors_off", "turning the motors off")
+            if self.ready:
+                try:
+                    await self.enable(False)
+                except (McuError, MotionError, asyncio.TimeoutError) as e:
+                    log.warning("shutdown: cannot turn the motors off: %s", e)
+            self._save_settings()
+            await asyncio.get_running_loop().run_in_executor(None, sync_all)
+        except Exception as e:  # noqa: BLE001
+            self._sd_phase("failed", f"shutdown failed: {e}")
+            raise
+        if not poweroff:
+            self._sd_phase("safe", "motors off, files saved: safe to unplug")
+            return
+        self._sd_phase("powering_off", "powering the Raspberry Pi off")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self.POWEROFF_CMD, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(proc.communicate(), 15)
+            if proc.returncode != 0:
+                text = out.decode(errors="replace").strip().splitlines()
+                raise OSError(text[0] if text else f"exit {proc.returncode}")
+        except (OSError, asyncio.TimeoutError) as e:
+            self._sd_phase("safe", "motors off, files saved: safe to unplug "
+                                   f"(the Pi could not power itself off: {e})")
+
+    # ================================================================ homing
     async def home(self, names: Optional[Iterable[str]] = None) -> None:
         """Home the given axes, or every axis with home_with_all = True."""
         self.last_error = ""
@@ -1291,6 +1370,7 @@ class MotionController:
                      if self.lock_owner else None),
             "sources": self.active_sources(),
             "motion": "move" if self._traj_kind == "park" else self._traj_kind,
+            "shutdown": self.shutdown_state,
             "playback": playback,
             "recording": self.recorder.state(),
             "limits": self.limits_status(),

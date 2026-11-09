@@ -18,6 +18,9 @@ Soft limits (learned)
     {"cmd": "limit_set", "axis": "tilt", "side": "max"}   current position (or "value")
     {"cmd": "limit_clear", "axis": "tilt", "side": "max"}  (both: omit side; all: omit axis)
     {"cmd": "limits_enable", "on": true}
+Shutdown
+    {"cmd": "shutdown"}        rest position, motors off, files flushed, Pi powered off
+    {"cmd": "shutdown", "poweroff": false}   same, but the Pi stays on (safe to unplug)
 Settings (axis units, stored on the Pi)
     {"cmd": "set_motion", "speed": 30, "accel": 50, "smoothing": 0.3}   all axes
     {"cmd": "set_motion", "advanced": true,
@@ -158,6 +161,12 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             await ctrl.clear_user_limit(msg.get("axis"), msg.get("side"))
         elif cmd == "limits_enable":
             await ctrl.enable_user_limits(bool(msg.get("on", True)))
+        # ------------------------------------------------ shutdown
+        elif cmd == "shutdown":
+            ctrl.claim_shutdown()
+            log.warning("shutdown requested")
+            _background(ctrl, ctrl.run_shutdown(poweroff=bool(msg.get("poweroff", True))))
+            reply["targets"] = ctrl.shutdown_targets()
         # ------------------------------------------------ settings
         elif cmd == "set_motion":
             ctrl.set_motion(speed=msg.get("speed"), accel=msg.get("accel"),

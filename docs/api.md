@@ -161,6 +161,7 @@ abridged:
  "limits": {"enabled": true,
             "axes": {"pan": {"min": -35.0, "max": 38.0}, "tilt": {"min": null, "max": 10.0}, ...},
             "effective": {"pan": [-35.0, 38.0], "tilt": [-30.0, 10.0], "zoom": [0.0, 250.0]}},
+ "shutdown": null,
  "lock": null, "sources": [], "playback": null, "recording": {"active": false},
  "tracking": {"phase": "idle", "track": null, "lap_time": null, "runs": 0, ...}}
 ```
@@ -182,6 +183,7 @@ abridged:
 | `axes.<n>.active` | The axis is in use (see `axis_active`) |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
 | `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
+| `shutdown` | `null`, or `{"phase", "message"}` once a shutdown is requested (5.10) |
 | `lock` | `null`, or `{"owner": <token>, "label": "<ip> (<client>)"}` |
 | `sources` | UDP / VISCA senders seen in the last 10 s |
 | `playback` | `null`, or `{"name", "phase": "positioning"/"playing", "progress": 0..1, "loop", "pass", "duration"}` |
@@ -365,6 +367,21 @@ is up. The limits and the on/off switch are stored on the Pi.
 {"cmd": "limits_enable", "on": true, "id": 3}
 ```
 
+### 5.10 Shutdown
+
+| Command | Parameters | Effect |
+|---|---|---|
+| `shutdown` | `poweroff` (bool, default true) | Moves the homed axes to their rest position (`shutdown_position` in the configuration: pan 0, tilt lowest by default), turns the motors off, flushes every file to the SD card, then powers the Raspberry Pi off. The reply comes at once, with `targets` (the rest positions); follow `status.shutdown`. |
+
+`status.shutdown.phase` goes `"parking"` → `"motors_off"` → `"powering_off"`.
+The connection then drops: wait about 15 s (the Pi's green LED stops
+blinking) before unplugging. If the Pi is not allowed to power itself off
+(sudoers rule missing, see `deploy/setup-remote.sh`), or with
+`"poweroff": false`, the phase ends as `"safe"`: the motors are off,
+everything is written, and the mount can be unplugged. A stop or E-stop
+during the rest move cancels the move only: the motors are still turned off.
+A second request is refused unless the first one `"failed"`.
+
 ## 6. Blocking mode for live events
 
 When a program holds the lock:
@@ -517,6 +534,7 @@ asyncio.run(main())
 | `jog(**values)`, `JogStream(client, rate=25)` | Jog: one frame, or a continuous stream |
 | `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)` | |
 | `limit_set(axis, side, value=None)`, `limit_clear(axis=None, side=None)`, `limits_enable(on)` | Soft limits |
+| `shutdown(poweroff=True)` | Rest, motors off, power off (5.10) |
 | `track_arm(name, wait=True)`, `track_go()`, `wait_lap()`, `track_set(**settings)`, `track_abort()` | Race tracking |
 | `play(name, speed, loop, wait)`, `play_stop()` | Replay |
 

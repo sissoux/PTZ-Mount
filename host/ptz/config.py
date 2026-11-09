@@ -188,6 +188,7 @@ class AxisConfig:
     units: str = "°"                 # display label of the axis unit
     active: bool = True              # in use at startup (can be toggled live)
     endstop_guard: bool = True       # MCU halts the axis on its endstop outside homing
+    shutdown_position: object = None  # None, "min", "max" or a position (shutdown park)
     tmc: Optional[TmcConfig] = None
 
     @property
@@ -341,6 +342,20 @@ def load(path: str) -> PtzConfig:
             raise ConfigError(f"[{name}] invalid microsteps {ax.microsteps}")
         if park is not None and not pmin <= park <= pmax:
             raise ConfigError(f"[{name}] park_position outside limits")
+        # shutdown_position: where the head rests before the motors are turned
+        # off for a shutdown. Default: pan 0, tilt at its lowest, others stay.
+        sd_txt = (s.get("shutdown_position", "") or "").strip().lower()
+        if sd_txt == "":
+            sd = {"pan": (0.0 if pmin <= 0.0 <= pmax else None), "tilt": "min"}.get(aname)
+        elif sd_txt in ("none", "off", "no"):
+            sd = None
+        elif sd_txt in ("min", "max"):
+            sd = sd_txt
+        else:
+            sd = s.getfloat("shutdown_position")
+            if not pmin <= sd <= pmax:
+                raise ConfigError(f"[{name}] shutdown_position outside limits")
+        ax.shutdown_position = sd
         tname = f"tmc2209 {aname}"
         if cp.has_section(tname):
             t = sec(tname)

@@ -40,7 +40,7 @@ function connect() {
       case "reply": onReply(m); break;
     }
   };
-  ws.onclose = () => { setConn(false); setTimeout(connect, 1000); };
+  ws.onclose = () => { setConn(false); if (!sdOffline()) setTimeout(connect, 1000); };
 }
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function onReply(m) {
@@ -130,6 +130,61 @@ function buildAxisSliders() {
       };
     }
   }
+}
+
+// ------------------------------------------------------------ shutdown
+let sdPhase = null, sdOffAt = null;
+$("btn-shutdown").onclick = () => {
+  const t = status && status.axes ? Object.entries(status.axes).filter(([, a]) => a.homed).map(([n]) => n) : [];
+  const where = t.length ? "move the head to its rest position (pan 0°, tilt lowest), " : "";
+  if (!confirm(`Shut the mount down?\n\nThis will ${where}turn the motors off and power the Raspberry Pi off.`)) return;
+  send({ cmd: "shutdown", id: "sd" });
+};
+function renderShutdown(sd) {
+  if (!sd) return;
+  sdPhase = sd.phase;
+  $("shutdown").style.top = `${document.querySelector("header").offsetHeight}px`;   // E-STOP stays reachable
+  $("shutdown").classList.remove("hidden");
+  const order = ["parking", "motors_off", "powering_off"];
+  const cur = order.indexOf(sd.phase);
+  order.forEach((p, i) => {
+    const li = $(`sd-s-${p}`);
+    li.className = sd.phase === "safe" ? (i < 2 ? "done" : "skip")
+      : sd.phase === "failed" ? "" : i < cur ? "done" : i === cur ? "now" : "";
+  });
+  $("sd-msg").textContent = sd.message;
+  if (sd.phase === "safe") {
+    $("sd-title").textContent = "Safe to unplug";
+    $("sd-icon").className = "sd-icon ok";
+    $("sd-hint").textContent = "The Pi is still on but writes nothing any more. To use the mount again, home the axes (reload this page).";
+  } else if (sd.phase === "failed") {
+    $("sd-title").textContent = "Shutdown failed";
+    $("sd-icon").className = "sd-icon bad";
+    $("sd-hint").textContent = "Reload the page to continue.";
+  } else {
+    $("sd-title").textContent = "Shutting down…";
+    $("sd-hint").textContent = "";
+  }
+}
+function sdOffline() {          // the Pi went away while powering off
+  if (sdPhase !== "powering_off") return false;
+  sdOffAt = sdOffAt || Date.now();
+  $("sd-s-powering_off").className = "now";
+  const tick = () => {
+    const left = Math.max(0, 15 - Math.round((Date.now() - sdOffAt) / 1000));
+    if (left > 0) {
+      $("sd-msg").textContent = `The Raspberry Pi is halting… ${left} s`;
+      setTimeout(tick, 500);
+    } else {
+      $("sd-s-powering_off").className = "done";
+      $("sd-title").textContent = "Safe to unplug";
+      $("sd-icon").className = "sd-icon ok";
+      $("sd-msg").textContent = "The Raspberry Pi is off (its green LED has stopped blinking).";
+      $("sd-hint").textContent = "Unplug the power. To restart, plug it back in and reload this page.";
+    }
+  };
+  tick();
+  return true;
 }
 
 // ------------------------------------------------------------ soft limits
@@ -226,6 +281,7 @@ function renderStatus(s) {
   }
   if (config && s.settings) renderSettings(s.settings);
   if (config && s.limits) renderLimits(s.limits, s.axes);
+  renderShutdown(s.shutdown);
   renderLock(s.lock);
   renderClients();
   renderRecorder(s.recording || {}, s.playback);

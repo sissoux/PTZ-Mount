@@ -736,3 +736,54 @@ def test_homing_one_axis_while_another_parks(tmp_path):
         assert ctrl.position("tilt") == pytest.approx(0, abs=0.1)
         assert ctrl.last_error == ""
     run(t, tmp_path)
+
+
+def test_shutdown_rests_head_turns_motors_off_and_powers_off(tmp_path):
+    import sys
+
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": 30, "tilt": 20}, wait=True)
+        # pan 0, tilt at its lowest (here the learned soft limit)
+        await ctrl.set_user_limit("tilt", "min", -30)
+        await ctrl.enable_user_limits(True)
+        assert ctrl.shutdown_targets() == {"pan": 0.0, "tilt": -30.0}
+        ctrl.POWEROFF_CMD = (sys.executable, "-c", "pass")      # stands for systemctl poweroff
+        r = await dispatch(ctrl, {"cmd": "shutdown"})
+        assert r["ok"] and r["targets"] == {"pan": 0.0, "tilt": -30.0}
+        assert not (await dispatch(ctrl, {"cmd": "shutdown"}))["ok"]   # only once
+        while ctrl.shutdown_state["phase"] not in ("powering_off", "safe", "failed"):
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
+        assert ctrl.shutdown_state["phase"] == "powering_off"
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.1)
+        assert ctrl.position("tilt") == pytest.approx(-30, abs=0.1)
+        st = ctrl.status()
+        assert not st["axes"]["pan"]["enabled"] and not st["axes"]["tilt"]["enabled"]
+        assert not st["axes"]["pan"]["homed"]
+        assert st["shutdown"]["phase"] == "powering_off"
+    run(t, tmp_path)
+
+
+def test_shutdown_without_poweroff_permission_is_safe_to_unplug(tmp_path):
+    import sys
+
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        ctrl.POWEROFF_CMD = (sys.executable, "-c", "import sys; print('sudo: a password is required'); sys.exit(1)")
+        await ctrl.shutdown()
+        assert ctrl.shutdown_state["phase"] == "safe"
+        assert "password is required" in ctrl.shutdown_state["message"]
+        assert ctrl.position("tilt") == pytest.approx(-45, abs=0.1)    # configured minimum
+        await ctrl.shutdown(poweroff=False)       # a new request after "safe" is refused
+    with pytest.raises(MotionError):
+        run(t, tmp_path)
+
+
+def test_settings_file_written_atomically(tmp_path):
+    async def t(ctrl):
+        await ctrl.enable_user_limits(True)
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["user_limits"]["enabled"] is True
+        assert not (tmp_path / "settings.json.tmp").exists()
+    run(t, tmp_path)

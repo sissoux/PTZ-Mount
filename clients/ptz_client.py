@@ -291,6 +291,11 @@ class PTZClient:
     async def limits_enable(self, on: bool) -> dict:
         return await self.call("limits_enable", on=on)
 
+    async def shutdown(self, poweroff: bool = True) -> dict:
+        """Rest position, motors off, files flushed, Pi powered off. Returns
+        at once; follow status["shutdown"]["phase"]."""
+        return await self.call("shutdown", poweroff=poweroff)
+
     # race tracking
     async def track_arm(self, name: str, wait: bool = True, timeout: float = 120) -> dict:
         return await self.call("track_arm", timeout=timeout if wait else None,

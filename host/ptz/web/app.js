@@ -136,7 +136,7 @@ function buildAxisSliders() {
 let sdPhase = null, sdOffAt = null;
 $("btn-shutdown").onclick = () => {
   const t = status && status.axes ? Object.entries(status.axes).filter(([, a]) => a.homed).map(([n]) => n) : [];
-  const where = t.length ? "move the head to its rest position (pan 0°, tilt lowest), " : "";
+  const where = t.length ? "move the head to its rest position (pan 0°, camera down), " : "";
   if (!confirm(`Shut the mount down?\n\nThis will ${where}turn the motors off and power the Raspberry Pi off.`)) return;
   send({ cmd: "shutdown", id: "sd" });
 };

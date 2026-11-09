@@ -744,20 +744,20 @@ def test_shutdown_rests_head_turns_motors_off_and_powers_off(tmp_path):
     async def t(ctrl):
         await ctrl.home(["pan", "tilt"])
         await ctrl.goto({"pan": 30, "tilt": 20}, wait=True)
-        # pan 0, tilt at its lowest (here the learned soft limit)
-        await ctrl.set_user_limit("tilt", "min", -30)
+        # pan 0, tilt at its max end (here the learned soft limit)
+        await ctrl.set_user_limit("tilt", "max", 60)
         await ctrl.enable_user_limits(True)
-        assert ctrl.shutdown_targets() == {"pan": 0.0, "tilt": -30.0}
+        assert ctrl.shutdown_targets() == {"pan": 0.0, "tilt": 60.0}
         ctrl.POWEROFF_CMD = (sys.executable, "-c", "pass")      # stands for systemctl poweroff
         r = await dispatch(ctrl, {"cmd": "shutdown"})
-        assert r["ok"] and r["targets"] == {"pan": 0.0, "tilt": -30.0}
+        assert r["ok"] and r["targets"] == {"pan": 0.0, "tilt": 60.0}
         assert not (await dispatch(ctrl, {"cmd": "shutdown"}))["ok"]   # only once
         while ctrl.shutdown_state["phase"] not in ("powering_off", "safe", "failed"):
             await asyncio.sleep(0.05)
         await asyncio.sleep(0.1)
         assert ctrl.shutdown_state["phase"] == "powering_off"
         assert ctrl.position("pan") == pytest.approx(0, abs=0.1)
-        assert ctrl.position("tilt") == pytest.approx(-30, abs=0.1)
+        assert ctrl.position("tilt") == pytest.approx(60, abs=0.1)
         st = ctrl.status()
         assert not st["axes"]["pan"]["enabled"] and not st["axes"]["tilt"]["enabled"]
         assert not st["axes"]["pan"]["homed"]
@@ -774,7 +774,7 @@ def test_shutdown_without_poweroff_permission_is_safe_to_unplug(tmp_path):
         await ctrl.shutdown()
         assert ctrl.shutdown_state["phase"] == "safe"
         assert "password is required" in ctrl.shutdown_state["message"]
-        assert ctrl.position("tilt") == pytest.approx(-45, abs=0.1)    # configured minimum
+        assert ctrl.position("tilt") == pytest.approx(90, abs=0.1)     # configured maximum
         await ctrl.shutdown(poweroff=False)       # a new request after "safe" is refused
     with pytest.raises(MotionError):
         run(t, tmp_path)

@@ -171,7 +171,7 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   replays, tracking and scripts all stop at the limits. Untick it to use the
   whole travel again; the learned values are kept on the Pi.
 * **⏻ Shutdown** (top right): the head goes to its rest position (pan 0°,
-  tilt at its lowest; `shutdown_position` per axis in the configuration), the
+  tilt at its max end, +32° here; `shutdown_position` per axis in the configuration), the
   motors are turned off, every file is flushed to the SD card and the Pi
   powers off. The page tells when it is safe to unplug (about 15 s after the
   connection drops). E-STOP stays available during the rest move. Powering

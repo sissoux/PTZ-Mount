@@ -371,7 +371,7 @@ is up. The limits and the on/off switch are stored on the Pi.
 
 | Command | Parameters | Effect |
 |---|---|---|
-| `shutdown` | `poweroff` (bool, default true) | Moves the homed axes to their rest position (`shutdown_position` in the configuration: pan 0, tilt lowest by default), turns the motors off, flushes every file to the SD card, then powers the Raspberry Pi off. The reply comes at once, with `targets` (the rest positions); follow `status.shutdown`. |
+| `shutdown` | `poweroff` (bool, default true) | Moves the homed axes to their rest position (`shutdown_position` in the configuration: pan 0, tilt at its max end by default), turns the motors off, flushes every file to the SD card, then powers the Raspberry Pi off. The reply comes at once, with `targets` (the rest positions); follow `status.shutdown`. |
 
 `status.shutdown.phase` goes `"parking"` → `"motors_off"` → `"powering_off"`.
 The connection then drops: wait about 15 s (the Pi's green LED stops

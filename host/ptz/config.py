@@ -343,10 +343,11 @@ def load(path: str) -> PtzConfig:
         if park is not None and not pmin <= park <= pmax:
             raise ConfigError(f"[{name}] park_position outside limits")
         # shutdown_position: where the head rests before the motors are turned
-        # off for a shutdown. Default: pan 0, tilt at its lowest, others stay.
+        # off for a shutdown. Default: pan 0, tilt at its max end (the camera
+        # rests down on this mount: positive tilt is down), others stay.
         sd_txt = (s.get("shutdown_position", "") or "").strip().lower()
         if sd_txt == "":
-            sd = {"pan": (0.0 if pmin <= 0.0 <= pmax else None), "tilt": "min"}.get(aname)
+            sd = {"pan": (0.0 if pmin <= 0.0 <= pmax else None), "tilt": "max"}.get(aname)
         elif sd_txt in ("none", "off", "no"):
             sd = None
         elif sd_txt in ("min", "max"):

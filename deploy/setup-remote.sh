@@ -40,4 +40,4 @@ fi
 
 echo
 echo "Done. Test with: sudo -n systemctl restart ptz && echo OK"
-echo "      and:       sudo -n -l /usr/bin/systemctl poweroff   (prints the command if allowed)"
+echo "      and:       sudo -n -l | grep poweroff   (the shutdown button may power the Pi off)"

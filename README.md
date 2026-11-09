@@ -148,8 +148,13 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
     recording and, for a track, the learned laps in grey. *Timelines* for
     pan, tilt and zoom, plus a speed lane that turns red where an axis would
     exceed its maximum speed.
-  * Drag points on the map or the timelines (Shift+drag on a timeline moves
-    the timing), double-click a timeline to add a point, Delete removes one.
+  * Drag points on the map or the timelines, double-click a timeline to add
+    a point, Delete removes one.
+  * *Time lane*: one diamond per keyframe. Drag it left / right to change
+    when the head gets there (all axes of that point move together, between
+    its neighbours); Shift+drag moves it and every later keyframe. The
+    numbers are the time between keyframes. ±0.1 / ±0.5 s buttons in the
+    point panel.
   * The on-track workflow: select a point (the head goes there when *Live* is
     on), correct the aim with the joystick, press **Set from head**. Nudge
     buttons (±0.1 / ±1) for small corrections.

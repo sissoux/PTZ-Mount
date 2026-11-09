@@ -245,7 +245,8 @@ function edFollow() {           // live mode: keep the head on the selected poin
 // ============================================================ side panel
 function edBuildSide() {
   const unit = (a) => (axisCfg(a) || {}).units || "";
-  $("ed-point").innerHTML = `<span>Time</span><input id="ed-f-t" type="number" step="0.05">`
+  $("ed-point").innerHTML = `<span>Time</span><div><input id="ed-f-t" type="number" step="0.05" title="s">
+      <div class="ed-nudge">${[-0.5, -0.1, 0.1, 0.5].map((d) => `<button data-nudge="t" data-d="${d}">${d > 0 ? "+" : ""}${d}s</button>`).join("")}</div></div>`
     + ED.axes.map((a) => `<span style="color:${ED_COLORS[a] || "inherit"}">${a}</span>
       <div><input id="ed-f-${a}" type="number" step="0.05" title="${unit(a)}">
       <div class="ed-nudge">${[-1, -0.1, 0.1, 1].map((d) => `<button data-nudge="${a}" data-d="${d}">${d > 0 ? "+" : ""}${d}</button>`).join("")}</div></div>`).join("");
@@ -258,7 +259,8 @@ function edBuildSide() {
     b.onclick = () => {
       const a = b.dataset.nudge;
       edSnapshot();
-      edSetPoint(ED.sel, a, ED.pts[ED.sel].pos[a] + parseFloat(b.dataset.d));
+      const p = ED.pts[ED.sel];
+      edSetPoint(ED.sel, a, (a === "t" ? p.t : p.pos[a]) + parseFloat(b.dataset.d), a !== "t");
     };
   });
   const hasZoom = config.axes.some((a) => a.name === "zoom");
@@ -413,10 +415,17 @@ function edDrawMap() {
   }
 }
 
+const ED_TIME_LANE_H = 44;
 function edLaneLayout(h) {
-  const lanes = ED.axes.concat(["speed"]), top = 22, gap = 8;
-  const lh = (h - top - 24 - gap * (lanes.length - 1)) / lanes.length;   // bottom: room for the legend
-  return lanes.map((name, i) => ({ name, y0: top + i * (lh + gap), y1: top + i * (lh + gap) + lh }));
+  const lanes = ED.axes.concat(["time", "speed"]), top = 22, gap = 8;
+  // bottom: room for the legend; the time lane has a fixed height
+  const lh = (h - top - 24 - gap * (lanes.length - 1) - ED_TIME_LANE_H) / (lanes.length - 1);
+  let y = top;
+  return lanes.map((name) => {
+    const l = { name, y0: y, y1: y + (name === "time" ? ED_TIME_LANE_H : lh) };
+    y = l.y1 + gap;
+    return l;
+  });
 }
 function edTlX(w) {
   const L = 60, R = 12;
@@ -440,6 +449,7 @@ function edDrawTimeline() {
     g.fillStyle = "#15171a"; g.fillRect(X.L, lane.y0, w - X.L - X.R, lane.y1 - lane.y0);
     g.fillStyle = ED_COLORS[a] || "#8a919c"; g.fillText(a === "speed" ? "speed °/s" : a, 6, lane.y0 + 12);
     if (a === "speed") { edDrawSpeedLane(g, X, lane, T); continue; }
+    if (a === "time") { edDrawTimeLane(g, X, lane, w); continue; }
     const [lo, hi] = ED.tl.lanes[a], Y = (v) => lane.y1 - (v - lo) / (hi - lo) * (lane.y1 - lane.y0);
     g.save(); g.beginPath(); g.rect(0, lane.y0, w, lane.y1 - lane.y0); g.clip();
     g.fillStyle = "#5c6470"; g.fillText(hi.toFixed(0), 34, lane.y0 + 24); g.fillText(lo.toFixed(0), 34, lane.y1 - 2);
@@ -472,9 +482,52 @@ function edDrawTimeline() {
     g.restore();
   }
   // playhead + end of path
+  const sp = ED.pts[ED.sel];                   // selected keyframe, across every lane
+  if (sp) {
+    g.strokeStyle = "rgba(255,255,255,0.18)"; g.lineWidth = 1; g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(X.x(sp.t), 16); g.lineTo(X.x(sp.t), h - 12); g.stroke(); g.setLineDash([]);
+  }
   g.strokeStyle = "#f0b429"; g.lineWidth = 2;
   g.beginPath(); g.moveTo(X.x(ED.play), 16); g.lineTo(X.x(ED.play), h - 12); g.stroke();
   g.strokeStyle = "#555"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(X.x(T), 16); g.lineTo(X.x(T), h - 12); g.stroke(); g.setLineDash([]);
+}
+
+// Keyframes only: drag one left / right to change when the head gets there
+// (every axis of that point moves with it). The numbers are the time
+// between two keyframes.
+function edDrawTimeLane(g, X, lane, w) {
+  const ym = (lane.y0 + lane.y1) / 2 - 4;
+  g.save(); g.beginPath(); g.rect(X.L - 8, lane.y0, w - X.L - X.R + 16, lane.y1 - lane.y0); g.clip();
+  g.strokeStyle = "#2d323a"; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(X.L, ym); g.lineTo(w - X.R, ym); g.stroke();
+  g.font = "10px system-ui"; g.textAlign = "center";
+  ED.pts.forEach((p, i) => {
+    const x = X.x(p.t), n = ED.pts[i + 1];
+    if (n) {
+      const xn = X.x(n.t);
+      if (xn - x > 34 && xn > X.L && x < w - X.R) {
+        g.fillStyle = "#5c6470"; g.fillText(`${(n.t - p.t).toFixed(2)}s`, (x + xn) / 2, lane.y1 - 4);
+      }
+    }
+    if (x < X.L - 8 || x > w - X.R + 8) return;
+    const sel = i === ED.sel, r = sel ? 7 : 5;
+    g.fillStyle = sel ? "#fff" : i === 0 ? "#2fb66f" : "#c9cdd4";
+    g.beginPath(); g.moveTo(x, ym - r); g.lineTo(x + r, ym); g.lineTo(x, ym + r); g.lineTo(x - r, ym); g.fill();
+  });
+  const p = ED.pts[ED.sel];
+  if (p) {
+    const x = X.x(p.t);
+    let txt = `${p.t.toFixed(2)} s`;
+    if (ED.drag && ED.drag.time && ED.drag.start !== undefined) {
+      const d = p.t - ED.drag.start;
+      txt += ` (${d >= 0 ? "+" : ""}${d.toFixed(2)})`;
+    }
+    g.font = "11px system-ui"; g.fillStyle = "#fff";
+    g.textAlign = x > w - 90 ? "right" : x < X.L + 60 ? "left" : "center";
+    g.fillText(txt, x, lane.y0 + 10);
+  }
+  g.restore();
+  g.textAlign = "left"; g.font = "11px system-ui";
 }
 
 function edDrawSpeedLane(g, X, lane, T) {
@@ -549,13 +602,23 @@ edPointer("ed-tl", {
   down(e, r) {
     const X = edTlX(r.width), mx = e.clientX - r.left, my = e.clientY - r.top;
     const lane = edLaneLayout(r.height).find((l) => my >= l.y0 && my <= l.y1);
-    if (lane && lane.name !== "speed") {
+    if (lane && lane.name === "time") {
+      let best = -1, bd = 9;
+      ED.pts.forEach((p, i) => { const d = Math.abs(X.x(p.t) - mx); if (d < bd) { bd = d; best = i; } });
+      if (best >= 0) {
+        ED.sel = best; edSnapshot();
+        ED.drag = { kind: "tlpoint", lane, moved: false, time: true, ripple: e.shiftKey,
+                    start: ED.pts[best].t, t0s: ED.pts.map((p) => p.t), mx0: mx };
+        edUpdateSide(); edRender(); edFollow();
+        return;
+      }
+    } else if (lane && lane.name !== "speed") {
       const [lo, hi] = ED.tl.lanes[lane.name], Y = (v) => lane.y1 - (v - lo) / (hi - lo) * (lane.y1 - lane.y0);
       let best = -1, bd = 10;
       ED.pts.forEach((p, i) => { const d = Math.hypot(X.x(p.t) - mx, Y(p.pos[lane.name]) - my); if (d < bd) { bd = d; best = i; } });
       if (best >= 0) {
         ED.sel = best; edSnapshot();
-        ED.drag = { kind: "tlpoint", lane, moved: false, time: e.shiftKey };
+        ED.drag = { kind: "tlpoint", lane, moved: false, time: e.shiftKey, start: ED.pts[best].t };
         edUpdateSide(); edRender(); edFollow();
         return;
       }
@@ -568,13 +631,20 @@ edPointer("ed-tl", {
     if (!ED.drag) return;
     const X = edTlX(r.width), mx = e.clientX - r.left, my = e.clientY - r.top;
     if (ED.drag.kind === "scrub") { ED.play = edClamp(X.t(mx), 0, edDuration()); edRender(); return; }
-    const lane = ED.drag.lane, a = lane.name, [lo, hi] = ED.tl.lanes[a];
+    const lane = ED.drag.lane, a = lane.name;
     const i = ED.sel, p = ED.pts[i];
     if (ED.drag.time) {
-      if (i === 0) return;
-      const tlo = ED.pts[i - 1].t + 0.02, thi = i < ED.pts.length - 1 ? ED.pts[i + 1].t - 0.02 : 1e9;
-      p.t = edRound(edClamp(X.t(mx), tlo, thi));
+      if (i === 0) return;                                  // the path starts at t = 0
+      if (ED.drag.ripple) {                                 // this keyframe and every later one
+        const t0s = ED.drag.t0s, dmin = t0s[i - 1] + 0.02 - t0s[i];
+        const d = Math.max(dmin, X.t(mx) - X.t(ED.drag.mx0));
+        for (let j = i; j < ED.pts.length; j++) ED.pts[j].t = edRound(t0s[j] + d);
+      } else {
+        const tlo = ED.pts[i - 1].t + 0.02, thi = i < ED.pts.length - 1 ? ED.pts[i + 1].t - 0.02 : 1e9;
+        p.t = edRound(edClamp(X.t(mx), tlo, thi));
+      }
     } else {
+      const [lo, hi] = ED.tl.lanes[a];
       const c = axisCfg(a), v = lo + (lane.y1 - my) / (lane.y1 - lane.y0) * (hi - lo);
       p.pos[a] = edRound(edClamp(v, c.min, c.max));
     }

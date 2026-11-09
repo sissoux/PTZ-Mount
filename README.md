@@ -141,7 +141,10 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   * Lap / GO marks a lap while learning, and fires GO while a track is armed
     or running.
   * The slider can drive the joystick speed (5-100 %), the zoom position
-    (slider = zoom, follows until reached), or the zoom rate (centre = stop).
+    (slider = zoom from wide to tele of the lens fitted, follows until
+    reached), or the zoom rate (centre = stop). Choose it under *Controller
+    slider*, below the lens (shown when the controller has a slider, also
+    in the Live view); the choice is kept per controller in the browser.
   * Keep the page visible: browsers stop reading controllers in background
     tabs.
 * **Homing first**: an axis that is not homed cannot move at all, whether

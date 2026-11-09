@@ -1111,6 +1111,13 @@ function renderGpLive(pad, pads) {
   }
   warn.textContent = w;
   warn.classList.toggle("hidden", !w);
+  const sliderOn = !!(pad && gp.map && gp.map.slider >= 0 && gp.map.slider < pad.axes.length);
+  $("gp-slider-row").classList.toggle("hidden", !sliderOn);
+  if (sliderOn) {
+    const sm = gp.map.sliderMode;
+    $("gp-slider-info").textContent = sm === "speed" ? `${Math.round(input.gpScale * 100)} %`
+      : sm === "zoom_pos" && !(status && status.axes.zoom && status.axes.zoom.homed) ? "home zoom" : "";
+  }
   if (!pad) {
     $("gp-info").innerHTML = gp.everSeen ? "Controller disconnected."
       : "<b>No controller visible yet.</b> Browsers only show a controller after a button "

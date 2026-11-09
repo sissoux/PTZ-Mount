@@ -65,6 +65,15 @@
           <button id="btn-lens-del" class="small" title="Forget this lens">🗑</button>
           <span id="lens-info" class="lens-info"></span>
         </div>
+        <div id="gp-slider-row" class="lens-row hidden">
+          <label for="gp-slider-mode">Controller slider</label>
+          <select id="gp-slider-mode" title="What the slider of the game controller does">
+            <option value="speed">Joystick speed</option>
+            <option value="zoom_pos">Zoom: slider position = zoom (wide … tele)</option>
+            <option value="zoom_rate">Zoom rate (centre = stop)</option>
+          </select>
+          <span id="gp-slider-info" class="lens-info"></span>
+        </div>
         <div id="lens-tilt" class="lens-tilt hidden">
           <span class="lt-label">Max tilt with this lens <b id="lens-tilt-val"></b></span>
           <button id="btn-lt-adjust" class="small" title="Free the tilt (soft limits off, up to the configured travel) to find how low the camera may go with this lens">Adjust</button>
@@ -170,11 +179,6 @@
             <tr><td>Slider</td><td><select id="gp-slider" class="gp-axis"></select></td>
               <td><label><input id="gp-slider-inv" type="checkbox"> invert</label></td>
               <td><button class="small" data-detect="gp-slider">detect</button></td></tr>
-            <tr><td>Slider controls</td><td colspan="3"><select id="gp-slider-mode">
-              <option value="speed">Joystick speed</option>
-              <option value="zoom_pos">Zoom position (slider = zoom)</option>
-              <option value="zoom_rate">Zoom rate (centre = stop)</option>
-            </select></td></tr>
             <tr><td>Deadband</td><td colspan="3"><input id="gp-deadband" type="number" min="0" max="0.5" step="0.01" class="short"></td></tr>
           </tbody></table>
           <div id="gp-buttons" class="gp-buttons"></div>

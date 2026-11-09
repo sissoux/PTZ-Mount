@@ -53,6 +53,12 @@ Race tracking
      "auto_adjust": true, "adjust_tolerance": 0.3}
     track_go during a lap drops it and starts the next one (smooth join)
     {"cmd": "track_abort"}
+Several cars (timing software; open to all, like track_go)
+    {"cmd": "await_car", "car": 5}   follow car 5: head to the line, wait for its crossing
+                                     (learning: drops the lap in progress; tracking: re-arm)
+    {"cmd": "lap", "car": 5}         car 5 crosses the line: lap mark / GO if it is the car
+                                     followed, lap time kept for every car
+    {"cmd": "car_name", "car": 5, "name": "Dupont"}    {"cmd": "cars_reset"}
 Blocking mode (web clients only)
     {"cmd": "lock"}   {"cmd": "unlock"}   {"cmd": "unlock", "force": true} (from the Pi)
     While locked, only the owner may send control commands; "stop", "estop"
@@ -80,7 +86,7 @@ _QUIET = {"jog", "status", "config", "presets", "recordings", "diag"}
 # allowed to everyone, even when another client holds the lock
 _OPEN = {"stop", "estop", "status", "config", "presets", "recordings", "diag",
          "debug", "lock", "unlock",
-         "track_go"}     # the timing system may fire what the operator armed
+         "track_go", "lap", "await_car"}   # the timing system may fire what the operator armed
 _last_jog_log = [0.0]
 
 
@@ -254,6 +260,15 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
                            adjust_tolerance=msg.get("adjust_tolerance"))
         elif cmd == "track_abort":
             await ctrl.track_abort()
+        # ------------------------------------------------ several cars
+        elif cmd == "await_car":
+            reply["state"] = await ctrl.await_car(msg["car"], msg.get("track"))
+        elif cmd == "lap":
+            reply.update(ctrl.car_lap(msg.get("car")))
+        elif cmd == "car_name":
+            ctrl.set_car_name(msg["car"], msg.get("name", ""))
+        elif cmd == "cars_reset":
+            ctrl.cars_reset()
         # ------------------------------------------------ info / debug
         elif cmd == "status":
             reply["status"] = ctrl.status()

@@ -35,6 +35,7 @@ from .level import Level, solve as level_solve, spread as level_spread
 from .mcu import McuError, McuLink
 from .presets import PresetStore
 from .recorder import Recorder
+from . import track as _track
 from .trajectory import (BlendIn, MoveTrajectory, PlaybackTrajectory, VelocityShaper,
                          braking_speed, clamp)
 
@@ -61,6 +62,8 @@ KP = 2.0                      # position feedback gain while streaming (1/s)
 FEEDBACK_LATENCY = 0.004      # s, host receive time vs MCU position sample
 LOCAL_ADDRESSES = ("127.0.0.1", "::1", "localhost")
 SOURCE_TTL = 10.0             # s, how long a UDP/VISCA sender is listed as active
+CARS = 12                     # cars that can be followed (numbered 1..CARS)
+_UNSET = object()
 
 
 class MotionController:
@@ -91,6 +94,12 @@ class MotionController:
         self.level_pitch = 0.0
         self.level_roll = 0.0
         self.level_marks: List[Tuple[float, float]] = []    # (pan, tilt) aimed level
+        # multi-car race: the car followed, and lap times of every car seen
+        self.cars: Dict[int, dict] = {n: {"name": "", "laps": 0, "last_lap": None,
+                                          "best_lap": None, "expected": None}
+                                      for n in range(1, CARS + 1)}
+        self.current_car: Optional[int] = None
+        self._car_cross: Dict[int, float] = {}      # car -> last line crossing (loop time)
         self.lock_owner: Optional[str] = None
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
@@ -353,6 +362,9 @@ class MotionController:
         for k in ("smoothing", "play_speed"):
             if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
+        for n, name in (data.get("car_names") or {}).items():
+            if str(n).isdigit() and int(n) in self.cars and isinstance(name, str):
+                self.cars[int(n)]["name"] = name[:24]
         lev = data.get("level") or {}
         self.level_on = bool(lev.get("enabled", False))
         for k in ("pitch", "roll"):
@@ -368,6 +380,7 @@ class MotionController:
                 "accel_axis": self.accel_axis, "smoothing": self.smoothing,
                 "play_speed": self.play_speed, "axis_active": self.axis_active,
                 "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits},
+                "car_names": {str(n): c["name"] for n, c in self.cars.items() if c["name"]},
                 "level": {"enabled": self.level_on, "pitch": self.level_pitch,
                           "roll": self.level_roll, "marks": self.level_marks}}
         try:
@@ -1430,15 +1443,18 @@ class MotionController:
         except asyncio.CancelledError:
             pass
 
-    def track_go(self) -> None:
+    def track_go(self, interval=_UNSET) -> None:
         """Timing signal: start the lap now. During a lap (or while returning
-        to the start) the current lap is dropped and the new one starts."""
+        to the start) the current lap is dropped and the new one starts.
+        interval: lap time measured by the caller (car_lap: per car); by
+        default the time since the previous GO."""
         tr = self.tracking
         if self._go is None or tr["phase"] == "idle" or self._track_task is None:
             raise MotionError("tracking is not armed: select a track and press ARM")
         loop_now = asyncio.get_running_loop().time()
-        if self._last_go is not None:
-            interval = loop_now - self._last_go
+        if interval is _UNSET:
+            interval = loop_now - self._last_go if self._last_go is not None else None
+        if interval is not None:
             tr["last_interval"] = round(interval, 3)
             if tr["auto_adjust"]:
                 self._auto_adjust(interval)
@@ -1463,6 +1479,123 @@ class MotionController:
         tr["target_lap"] = round(new, 3)
         tr["adjust_note"] = f"lap {interval:.2f} s: next lap {cur:.2f} -> {new:.2f} s"
         log.info("auto adjust: %s", tr["adjust_note"])
+
+    # ================================================================ cars
+    def _car(self, car) -> int:
+        try:
+            n = int(car)
+        except (TypeError, ValueError):
+            raise MotionError(f"car must be a number 1..{CARS}") from None
+        if not 1 <= n <= CARS:
+            raise MotionError(f"car must be 1..{CARS}")
+        return n
+
+    def _car_label(self, n: Optional[int]) -> str:
+        if n is None:
+            return "any car"
+        return f"car {n}" + (f" ({self.cars[n]['name']})" if self.cars[n]["name"] else "")
+
+    def set_car_name(self, car, name: str) -> None:
+        self.cars[self._car(car)]["name"] = str(name or "").strip()[:24]
+        self._save_settings()
+
+    def cars_reset(self) -> None:
+        """New race: forget every lap time (names are kept)."""
+        for c in self.cars.values():
+            c.update(laps=0, last_lap=None, best_lap=None, expected=None)
+        self._car_cross.clear()
+        log.info("car lap times cleared")
+
+    async def await_car(self, car, track: Optional[str] = None) -> str:
+        """Follow another car: the head goes to the start line and waits for
+        that car's next crossing (a "lap" event with its number).
+
+        Learning a track: the lap in progress is dropped, the head goes to
+        where it looked at the line, and the next crossing starts a new lap.
+        Tracking (armed or running, or `track` given): re-arm on the track;
+        GO now only comes from this car. Otherwise the car is just selected.
+        Returns "learning", "tracking" or "selected"."""
+        c = self._car(car)
+        self.current_car = c
+        rec, tr = self.recorder, self.tracking
+        if rec.active and rec.mode == "laps":
+            rec.lap_break()
+            pos = {n: v for n, v in rec.line_position().items()
+                   if n in self.state and self.state[n].homed and self.axis_active[n]}
+            log.info("learning: now following %s, waiting at the line", self._car_label(c))
+            if pos:
+                await self.goto(pos)
+            return "learning"
+        name = track or (tr["track"] if tr["phase"] != "idle" else None)
+        if name:
+            exp = self.cars[c]["expected"]
+            if tr["auto_adjust"] and exp:
+                tr["target_lap"] = exp
+            await self.track_arm(name)
+            log.info("tracking: now following %s", self._car_label(c))
+            return "tracking"
+        log.info("now following %s", self._car_label(c))
+        return "selected"
+
+    def car_lap(self, car=None) -> dict:
+        """A car crosses the start / finish line (timing software).
+
+        Every car's lap time is kept. The car followed (see await_car; any
+        car while none is selected) also drives the head: a lap mark while
+        learning, a GO while tracking."""
+        c = self.current_car if car is None else self._car(car)
+        now = asyncio.get_running_loop().time()
+        interval = None
+        if c is not None:
+            prev = self._car_cross.get(c)
+            if prev is not None and now - prev < _track.MIN_LAP_S:
+                return {"car": c, "action": "ignored"}       # repeated signal
+            self._car_cross[c] = now
+            info = self.cars[c]
+            if prev is not None:
+                lap = now - prev
+                ref = info["expected"] or info["last_lap"]
+                if ref is None and c == self.current_car:
+                    ref = self.current_lap_time()
+                if ref is None or lap <= 1.6 * ref:          # else: laps missed meanwhile
+                    interval = lap
+                    info["laps"] += 1
+                    info["last_lap"] = round(lap, 3)
+                    if info["best_lap"] is None or lap < info["best_lap"]:
+                        info["best_lap"] = round(lap, 3)
+                    exp = info["expected"]
+                    tol = self.tracking["adjust_tolerance"]
+                    if exp is None:
+                        info["expected"] = round(lap, 3)
+                    elif abs(lap / exp - 1.0) <= tol:
+                        info["expected"] = round((exp + lap) / 2.0, 3)
+        if self.current_car is not None and c != self.current_car:
+            return {"car": c, "action": "none"}
+        action = "none"
+        rec = self.recorder
+        if rec.active and rec.mode == "laps":
+            self.lap_mark()
+            action = "mark"
+        elif self.tracking["phase"] != "idle" and self._track_task is not None:
+            self.track_go(interval)
+            if c is not None and self.tracking["auto_adjust"] and self.tracking["target_lap"]:
+                self.cars[c]["expected"] = self.tracking["target_lap"]
+            action = "go"
+        return {"car": c, "action": action}
+
+    def cars_status(self) -> dict:
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = None
+        waiting = bool((self.recorder.active and self.recorder.mode == "laps"
+                        and self.recorder.waiting)
+                       or self.tracking["phase"] in ("arming", "armed"))
+        return {"current": self.current_car, "waiting": waiting,
+                "list": [{"car": n, **c,
+                          "since": (round(now - self._car_cross[n], 1)
+                                    if now is not None and n in self._car_cross else None)}
+                         for n, c in self.cars.items()]}
 
     async def track_abort(self) -> None:
         names = list(self._traj.axes) if self._traj is not None else None
@@ -1509,6 +1642,7 @@ class MotionController:
             "recording": self.recorder.state(),
             "limits": self.limits_status(),
             "level": self.level_status(),
+            "cars": self.cars_status(),
             "tracking": {**self.tracking, "speed_eff": round(self._track_speed(), 3),
                          "current_lap": (round(self.current_lap_time(), 3)
                                          if self.current_lap_time() else None),

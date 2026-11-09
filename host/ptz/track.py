@@ -7,6 +7,11 @@ normalized lap phase (0 = start line, 1 = start line again) and the laps are
 averaged point by point. Laps far from the others (missed car, late mark...)
 are rejected automatically. The averaged lap keeps the mean lap time, so
 replaying it at 1x follows a "regular" car.
+
+Breaks: when the operator switches to another car during the session, the
+lap in progress is not a real lap (the head goes back to the line and waits
+for the new car). A break is stored at that time; marks on both sides of a
+break never form a lap.
 """
 from __future__ import annotations
 
@@ -46,17 +51,24 @@ class _Series:
         return {n: a[n] + (b[n] - a[n]) * w for n in self.axes}
 
 
-def split_laps(points: List[dict], markers: List[float]) -> List[List[dict]]:
+def lap_pairs(markers: List[float], breaks=()) -> List[Tuple[float, float]]:
+    """(start, end) of every complete lap: consecutive marks with no break
+    between them. Double presses (marks closer than MIN_LAP_S) are dropped."""
+    marks: List[float] = []
+    for m in sorted(markers):
+        if not marks or m - marks[-1] >= MIN_LAP_S or any(marks[-1] < x <= m for x in breaks):
+            marks.append(m)
+    return [(a, b) for a, b in zip(marks, marks[1:])
+            if not any(a < x <= b for x in breaks)]
+
+
+def split_laps(points: List[dict], markers: List[float], breaks=()) -> List[List[dict]]:
     """Cut a recording into laps between consecutive start-line marks."""
     if len(points) < 2:
         raise TrackError("recording is empty")
     series = _Series(points)
-    marks = []
-    for m in sorted(markers):
-        if not marks or m - marks[-1] >= MIN_LAP_S:
-            marks.append(m)
     laps = []
-    for a, b in zip(marks, marks[1:]):
+    for a, b in lap_pairs(markers, breaks):
         inner = [{"t": p["t"] - a, "pos": p["pos"]} for p in points if a < p["t"] < b]
         laps.append([{"t": 0.0, "pos": series.at(a)}] + inner
                     + [{"t": b - a, "pos": series.at(b)}])

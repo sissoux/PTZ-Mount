@@ -96,6 +96,18 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
    lap uses the halfway value (17 s in use, 18 s measured: 17.5 s next).
    Intervals outside the tolerance are ignored, for example a crash, a slow
    lap, or a GO triggered by another car.
+6. **Several cars.** Click a car number (1..12) under *Car followed*, or let
+   the timing software do it: `{"cmd":"await_car","car":5}`. The head goes
+   to the start line and waits for that car's next crossing, which the
+   software sends as `{"cmd":"lap","car":5}` (UDP or HTTP, like
+   `track_go`). While **learning**, the lap in progress is dropped and the
+   next crossing starts a new lap, so you can switch cars at any time and
+   only follow by hand; the crossings replace Space. While **tracking**, the
+   head re-arms and only that car's crossing fires the lap. The software may
+   send the crossings of every car: only the car followed drives the head,
+   and each car's last / best lap time is shown (*Names & lap times*, where
+   cars can be named). Auto adjust measures each car on its own crossings,
+   and switching to a car uses its own lap time.
 
 ## Control interfaces
 

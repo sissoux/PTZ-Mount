@@ -312,6 +312,7 @@ function renderStatus(s) {
   renderLock(s.lock);
   renderClients();
   renderRecorder(s.recording || {}, s.playback);
+  if (s.cars) renderCars(s.cars);
   renderTracking(s.tracking || {}, s.recording || {});
   $("config-banner").classList.toggle("hidden", !s.config_error);
   $("config-banner").textContent = s.config_error ? `Configuration: ${s.config_error}` : "";
@@ -580,6 +581,50 @@ function renderTrackSelect(selectName) {
   if (tracks.some((r) => r.name === cur)) sel.value = cur;
 }
 
+// ------------------------------------------------------------ cars
+let carsBuilt = false;
+const lapTxt = (v) => (v == null ? "-" : `${v.toFixed(2)} s`);
+function buildCars(list) {
+  $("car-grid").innerHTML = list.map((c) => `<button class="car-btn" id="car-${c.car}" data-car="${c.car}"
+      title="Follow car ${c.car}: go to the line and wait for its next crossing"><b>${c.car}</b><small id="car-sub-${c.car}"></small></button>`).join("");
+  $("car-grid").querySelectorAll("[data-car]").forEach((b) => {
+    b.onclick = () => send({ cmd: "await_car", car: parseInt(b.dataset.car, 10), id: "car" });
+  });
+  const tb = $("car-table").querySelector("tbody");
+  tb.innerHTML = list.map((c) => `<tr id="carrow-${c.car}"><td>${c.car}</td>
+      <td><input id="car-name-${c.car}" type="text" maxlength="24" placeholder="name"></td>
+      <td class="num" id="car-laps-${c.car}"></td><td class="num" id="car-last-${c.car}"></td>
+      <td class="num" id="car-best-${c.car}"></td><td class="num" id="car-seen-${c.car}"></td></tr>`).join("");
+  for (const c of list) {
+    $(`car-name-${c.car}`).onchange = (e) => send({ cmd: "car_name", car: c.car, name: e.target.value.trim(), id: "cn" });
+  }
+  carsBuilt = true;
+}
+function renderCars(cars) {
+  if (!carsBuilt) buildCars(cars.list);
+  for (const c of cars.list) {
+    const b = $(`car-${c.car}`);
+    const cur = cars.current === c.car;
+    b.classList.toggle("current", cur);
+    b.classList.toggle("waiting", cur && cars.waiting);
+    $(`car-sub-${c.car}`).textContent = c.name || (c.last_lap ? c.last_lap.toFixed(1) : "");
+    const n = $(`car-name-${c.car}`);
+    if (document.activeElement !== n) n.value = c.name;
+    $(`car-laps-${c.car}`).textContent = c.laps || "";
+    $(`car-last-${c.car}`).textContent = c.last_lap ? lapTxt(c.last_lap) : "";
+    $(`car-best-${c.car}`).textContent = c.best_lap ? lapTxt(c.best_lap) : "";
+    $(`car-seen-${c.car}`).textContent = c.since != null ? `${Math.round(c.since)} s ago` : "";
+    $(`carrow-${c.car}`).classList.toggle("current", cur);
+  }
+  const c = cars.current ? cars.list[cars.current - 1] : null;
+  $("car-status").textContent = !c ? "none: every lap signal counts"
+    : `#${c.car}${c.name ? " " + c.name : ""}` + (cars.waiting ? " - waiting at the line" : "");
+  $("car-status").classList.toggle("waiting", !!(c && cars.waiting));
+}
+$("btn-cars-reset").onclick = () => {
+  if (confirm("Forget the lap times of every car (new race)?")) send({ cmd: "cars_reset", id: "cr" });
+};
+
 function renderTracking(tr, rec) {
   const isLearning = rec.active && rec.mode === "laps";
   $("btn-learn").textContent = isLearning ? "■ Stop & build" : "● Start learning";
@@ -587,7 +632,11 @@ function renderTracking(tr, rec) {
   $("btn-learn-cancel").classList.toggle("hidden", !isLearning);
   $("learn-active").classList.toggle("hidden", !isLearning);
   if (isLearning) {
-    $("learn-status").textContent = rec.marks === 0
+    const cur = status && status.cars && status.cars.current;
+    $("learn-status").textContent = rec.waiting
+      ? `Waiting at the line for car ${cur || ""}: its next crossing starts a new lap.`
+        + (rec.laps ? ` (${rec.laps} lap(s) done)` : "")
+      : rec.marks === 0
       ? "Recording. Press LAP / Space when the car crosses the start line."
       : `${rec.laps} lap(s) done` + (rec.last_lap ? `, last ${rec.last_lap.toFixed(2)} s` : "")
         + ` - current lap ${rec.lap_elapsed.toFixed(1)} s`;
@@ -610,7 +659,9 @@ function renderTracking(tr, rec) {
   $("track-status").textContent = {
     idle: "", done: `Lap done (${tr.runs}). Press ARM for the next one.`,
     arming: `Moving to the start point of "${tr.track}"…`,
-    armed: `ARMED on "${tr.track}": waiting for GO` + (tr.runs ? ` (${tr.runs} lap(s) done)` : ""),
+    armed: `ARMED on "${tr.track}": waiting for GO`
+      + (status.cars && status.cars.current ? ` from car ${status.cars.current}` : "")
+      + (tr.runs ? ` (${tr.runs} lap(s) done)` : ""),
     running: `Tracking lap ${tr.runs + 1}… (GO again = next lap)`,
   }[phase] || phase;
 }

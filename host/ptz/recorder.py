@@ -23,13 +23,13 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .fsutil import atomic_write_json, atomic_write_text
-from .track import TrackError, average_laps, split_laps
+from .track import TrackError, average_laps, lap_pairs, split_laps
 
 RATE_HZ = 20.0
 MODES = ("continuous", "keypoints", "laps")
 # Recording kinds on disk: continuous, keypoints, laps-raw (learning session
 # with lap marks), track (averaged lap built from a laps-raw session)
-EXTRA_KEYS = ("markers", "laps", "lap_time", "source")
+EXTRA_KEYS = ("markers", "breaks", "laps", "lap_time", "source")
 MOVE_EPS = 0.01       # units: movement that starts an armed recording
 TRIM_EPS = 0.01       # units: tolerance of the motionless end
 MAX_POINTS = 200_000
@@ -65,6 +65,9 @@ class Recorder:
         self.name = ""
         self.points: List[dict] = []
         self.markers: List[float] = []       # lap marks (laps mode)
+        self.breaks: List[float] = []        # car switches: no lap across them
+        self.waiting = False                 # switched car, waiting for its next mark
+        self.mark_pos: List[Dict[str, float]] = []    # head position at each mark
         self.armed = False                   # waiting for the first movement
         self.trim = False
         self._baseline: Dict[str, float] = {}
@@ -82,6 +85,7 @@ class Recorder:
             raise RecorderError("home the axes before recording")
         self.mode, self.name = mode, _safe_name(name) if name else ""
         self.points, self.markers, self.active = [], [], True
+        self.breaks, self.mark_pos, self.waiting = [], [], False
         if mode == "laps":
             on_move = False                  # the lap marks define the useful part
         self.armed = self.trim = bool(on_move)
@@ -116,7 +120,26 @@ class Recorder:
         now = self._clock()
         self._add(now)                       # exact position at the mark
         self.markers.append(round(now - self._t0, 4))
+        self.mark_pos.append(dict(self.points[-1]["pos"]))
+        self.waiting = False
         return len(self.markers)
+
+    def lap_break(self) -> None:
+        """Learning mode: switching to another car. The lap in progress is
+        dropped; the next mark (the new car on the line) starts a new lap."""
+        if not self.active or self.mode != "laps":
+            raise RecorderError("not learning a track")
+        if not self.waiting and self.markers:        # a lap is in progress
+            self.breaks.append(round(self._clock() - self._t0, 4))
+        self.waiting = True
+
+    def line_position(self) -> Dict[str, float]:
+        """Mean head position at the marks of this session (where the head
+        looks when a car crosses the line); empty before the first mark."""
+        if not self.mark_pos:
+            return {}
+        axes = [n for n in self.mark_pos[0] if all(n in p for p in self.mark_pos)]
+        return {n: sum(p[n] for p in self.mark_pos) / len(self.mark_pos) for n in axes}
 
     def keypoint(self) -> int:
         if not self.active:
@@ -151,11 +174,14 @@ class Recorder:
 
     def _finish_learning(self) -> dict:
         name = self.name or time.strftime("track-%Y%m%d-%H%M")
-        if len(self.markers) < 2:
+        if not lap_pairs(self.markers, self.breaks):
             raise RecorderError("no complete lap: press the lap key each time you pass "
-                                "the start line (at least twice)")
-        raw = self._save({"name": f"{name} (raw)", "mode": "laps-raw",
-                          "points": self.points, "markers": self.markers})
+                                "the start line (at least twice for the same car)")
+        raw = {"name": f"{name} (raw)", "mode": "laps-raw",
+               "points": self.points, "markers": self.markers}
+        if self.breaks:
+            raw["breaks"] = self.breaks
+        raw = self._save(raw)
         return self.build_track(raw["name"], name=name)
 
     def build_track(self, raw_name: str, exclude: Tuple[int, ...] = (),
@@ -165,7 +191,7 @@ class Recorder:
         if raw.get("mode") != "laps-raw":
             raise RecorderError(f"'{raw_name}' is not a learning session")
         try:
-            laps = split_laps(raw["points"], raw.get("markers", []))
+            laps = split_laps(raw["points"], raw.get("markers", []), raw.get("breaks", []))
             points, stats = average_laps(laps, tuple(exclude), auto_reject=not exclude)
         except TrackError as e:
             raise RecorderError(str(e)) from None
@@ -180,6 +206,7 @@ class Recorder:
         self.active = self.armed = False
         self.points = []
         self.markers = []
+        self.breaks, self.mark_pos, self.waiting = [], [], False
 
     def _save(self, data: dict, overwrite: bool = True) -> dict:
         name = _safe_name(data["name"])
@@ -268,6 +295,9 @@ class Recorder:
             t0 = float(pts[0]["t"])
             out["markers"] = [float(m) - t0 for m in data["markers"]
                               if isinstance(m, (int, float))]
+            if isinstance(data.get("breaks"), list):
+                out["breaks"] = [float(m) - t0 for m in data["breaks"]
+                                 if isinstance(m, (int, float))]
         return out
 
     def _add(self, now: Optional[float] = None) -> None:
@@ -288,11 +318,14 @@ class Recorder:
         st = {"active": True, "armed": False, "mode": self.mode,
               "points": len(self.points), "elapsed": round(elapsed, 1)}
         if self.mode == "laps":
+            pairs = lap_pairs(self.markers, self.breaks)
             st["marks"] = len(self.markers)
-            st["laps"] = max(0, len(self.markers) - 1)
-            st["lap_elapsed"] = round(elapsed - self.markers[-1], 1) if self.markers else None
-            if len(self.markers) >= 2:
-                st["last_lap"] = round(self.markers[-1] - self.markers[-2], 2)
+            st["laps"] = len(pairs)
+            st["waiting"] = self.waiting
+            st["lap_elapsed"] = (round(elapsed - self.markers[-1], 1)
+                                 if self.markers and not self.waiting else None)
+            if pairs and pairs[-1][1] == max(self.markers):
+                st["last_lap"] = round(pairs[-1][1] - pairs[-1][0], 2)
         return st
 
     # ------------------------------------------------------------ library

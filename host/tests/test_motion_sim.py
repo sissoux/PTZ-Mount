@@ -835,3 +835,74 @@ def test_base_levelling_keeps_pan_jog_flat(tmp_path):
         await dispatch(ctrl, {"cmd": "level_clear"})
         assert ctrl.status()["level"]["marks"] == [] and ctrl.level_pitch == 0
     run(t, tmp_path)
+
+
+def test_several_cars_learning_and_tracking(tmp_path, monkeypatch):
+    import ptz.track
+    monkeypatch.setattr(ptz.track, "MIN_LAP_S", 0.2)     # simulated laps are short
+
+    async def lap_of(ctrl):
+        await ctrl.goto({"pan": 40, "tilt": 10}, wait=True)
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+        assert (await dispatch(ctrl, {"cmd": "record_start", "mode": "laps", "name": "Multi"}))["ok"]
+        # the timing software follows car 1
+        assert (await dispatch(ctrl, {"cmd": "await_car", "car": 1}))["state"] == "learning"
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 1}))["action"] == "mark"
+        await lap_of(ctrl)
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 7}))["action"] == "none"   # other car
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 1}))["action"] == "mark"
+        # half way round, switch to car 2: the head goes back to the line and waits
+        await ctrl.goto({"pan": 30, "tilt": 8}, wait=True)
+        await dispatch(ctrl, {"cmd": "await_car", "car": 2})
+        assert ctrl.status()["recording"]["waiting"] and ctrl.status()["cars"]["waiting"]
+        for _ in range(200):
+            if ctrl._traj is None and abs(ctrl.position("pan")) < 0.2:
+                break
+            await asyncio.sleep(0.02)
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.2)
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 1}))["action"] == "none"
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 2}))["action"] == "mark"
+        assert not ctrl.status()["recording"]["waiting"]
+        await lap_of(ctrl)
+        await dispatch(ctrl, {"cmd": "lap", "car": 2})
+        assert ctrl.status()["recording"]["laps"] == 2
+        r = await dispatch(ctrl, {"cmd": "record_stop"})
+        assert r["ok"], r
+        assert len(r["recording"]["laps"]) == 2         # the broken lap is not used
+        raw = ctrl.recorder.load("Multi (raw)")
+        assert len(raw["breaks"]) == 1 and len(raw["markers"]) == 4
+
+        # tracking car 2, then the operator switches to car 3 (page locked)
+        assert (await dispatch(ctrl, {"cmd": "track_arm", "name": "Multi", "wait": True}))["ok"]
+        await dispatch(ctrl, {"cmd": "lock"}, client="operator")
+        await asyncio.sleep(0.3)                          # car 2's next crossing
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 2}, source="udp timing"))["action"] == "go"
+        assert ctrl.tracking["phase"] == "running"
+        await asyncio.sleep(0.3)
+        r = await dispatch(ctrl, {"cmd": "await_car", "car": 3}, source="udp timing")
+        assert r["ok"] and r["state"] == "tracking" and ctrl.current_car == 3
+        for _ in range(200):
+            if ctrl.tracking["phase"] == "armed":
+                break
+            await asyncio.sleep(0.02)
+        assert ctrl.tracking["phase"] == "armed"
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.2)
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 2}, source="udp timing"))["action"] == "none"
+        assert ctrl.tracking["phase"] == "armed"
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 3}, source="udp timing"))["action"] == "go"
+        assert ctrl.tracking["phase"] == "running"
+        assert (await dispatch(ctrl, {"cmd": "lap", "car": 3}))["action"] == "ignored"  # repeat
+        await dispatch(ctrl, {"cmd": "unlock"}, client="operator")
+        cars = {c["car"]: c for c in ctrl.status()["cars"]["list"]}
+        assert cars[1]["laps"] == 2 and cars[1]["best_lap"] > 0.3 and cars[2]["laps"] >= 1
+        assert (await dispatch(ctrl, {"cmd": "car_name", "car": 3, "name": "Dupont"}))["ok"]
+        assert json.loads((tmp_path / "settings.json").read_text())["car_names"] == {"3": "Dupont"}
+        assert not (await dispatch(ctrl, {"cmd": "await_car", "car": 13}))["ok"]
+        await dispatch(ctrl, {"cmd": "cars_reset"})
+        assert all(c["laps"] == 0 for c in ctrl.status()["cars"]["list"])
+        await ctrl.track_abort()
+    run(t, tmp_path)

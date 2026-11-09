@@ -333,6 +333,25 @@ class PTZClient:
     async def track_abort(self) -> dict:
         return await self.call("track_abort")
 
+    # several cars (timing software)
+    async def await_car(self, car: int, track: Optional[str] = None) -> str:
+        """Follow this car: head to the line, wait for its next crossing.
+        Returns "learning", "tracking" or "selected"."""
+        params = {"car": car}
+        if track:
+            params["track"] = track
+        return (await self.call("await_car", **params))["state"]
+
+    async def lap(self, car: Optional[int] = None) -> dict:
+        """This car crosses the start / finish line. Returns {"car", "action"}."""
+        return await self.call("lap", **({"car": car} if car is not None else {}))
+
+    async def car_name(self, car: int, name: str) -> dict:
+        return await self.call("car_name", car=car, name=name)
+
+    async def cars_reset(self) -> dict:
+        return await self.call("cars_reset")
+
     # recordings
     async def play(self, name: str, speed: float = 1.0, loop: bool = False,
                    wait: bool = False, timeout: Optional[float] = None) -> dict:

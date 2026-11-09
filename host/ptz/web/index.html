@@ -165,6 +165,20 @@
     <div class="col col-right">
       <section class="card race">
         <h2>Race tracking</h2>
+        <h3>Car followed <span id="car-status" class="car-status"></span></h3>
+        <div id="car-grid" class="car-grid"></div>
+        <details class="car-more">
+          <summary>Names &amp; lap times</summary>
+          <table id="car-table" class="car-table"><thead>
+            <tr><th>Car</th><th>Name</th><th>Laps</th><th>Last</th><th>Best</th><th>Seen</th></tr>
+          </thead><tbody></tbody></table>
+          <button id="btn-cars-reset" class="small ghost" title="New race: forget every lap time (names are kept)">Reset lap times</button>
+        </details>
+        <p class="hint">Click a car to follow it: the head goes to the line and waits for
+          that car's next crossing (learning: the lap in progress is dropped; tracking: re-armed).
+          From the timing software: <code>{"cmd":"await_car","car":5}</code> and, at each
+          crossing, <code>{"cmd":"lap","car":5}</code> (UDP port 9000 or HTTP POST /api/cmd).</p>
+
         <h3>1 · Learn the lap</h3>
         <div class="row">
           <input id="learn-name" type="text" placeholder="track name (e.g. Circuit)">

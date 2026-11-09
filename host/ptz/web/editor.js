@@ -150,10 +150,11 @@ async function edLoadGhosts(source) {
   try {
     const raw = await (await fetch(`/api/recordings/${encodeURIComponent(source)}`)).json();
     const marks = (raw.markers || []).slice().sort((a, b) => a - b);
+    const breaks = raw.breaks || [];          // car switches: no lap across them
     const laps = [];
     for (let i = 0; i + 1 < marks.length; i++) {
       const a = marks[i], b = marks[i + 1];
-      if (b - a < 2) continue;
+      if (b - a < 2 || breaks.some((x) => a < x && x <= b)) continue;
       const pts = raw.points.filter((p) => p.t >= a && p.t < b)
         .map((p) => ({ phase: (p.t - a) / (b - a), pos: p.pos }));
       if (pts.length > 3) laps.push(pts);

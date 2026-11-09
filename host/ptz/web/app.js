@@ -7,7 +7,7 @@ const JOG_HZ = 25;
 const NUM_PRESETS = 12;
 const MAX_LOG = 1500;
 let ws = null, config = null, presets = {}, status = null, recordings = [];
-let logEntries = [], myId = null, clients = [];
+let logEntries = [], myId = null, clients = [], lastStatusError = "";
 
 const $ = (id) => document.getElementById(id);
 // per-browser identity (blocking mode is shared by every tab of this browser)
@@ -197,7 +197,8 @@ function renderStatus(s) {
   const b = $("btn-estop");
   b.textContent = s.estop ? "RESET E-STOP" : "E-STOP";
   b.classList.toggle("reset", s.estop);
-  if (s.error) showError(s.error);
+  if (s.error && s.error !== lastStatusError) showError(s.error);   // once, not 20 times a second
+  lastStatusError = s.error;
   for (const [name, a] of Object.entries(s.axes)) {
     const p = $(`pos-${name}`); if (!p) continue;
     p.textContent = fmtPos(a.pos, a.units);

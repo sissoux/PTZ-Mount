@@ -699,3 +699,40 @@ def test_editor_save_replaces_with_backup_and_hides_scratch(tmp_path):
             ctrl.save_edited_recording("Spa", {"points": [{"t": 0, "pos": {"pan": 999}},
                                                           {"t": 1, "pos": {"pan": 0}}]})
     run(t, tmp_path)
+
+
+def test_replaced_move_does_not_leave_other_axis_running(tmp_path):
+    """A new move on tilt only, while pan is moving: pan must come to a stop,
+    not keep its last streamed speed on the board (it used to run on until
+    the tilt move ended and the board watchdog fired)."""
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": 150})
+        await asyncio.sleep(0.6)
+        assert abs(ctrl.state["pan"].vel) > 0
+        at_cancel = ctrl.position("pan")
+        await ctrl.goto({"tilt": 85}, speed=0.1)
+        await asyncio.sleep(0.8)
+        assert ctrl.status()["motion"] == "move"          # tilt still moving
+        assert ctrl.state["pan"].vel == 0
+        stopped_at = ctrl.position("pan")
+        assert stopped_at < at_cancel + 6                 # braked, not run to the 170 end
+        await asyncio.sleep(0.3)
+        assert ctrl.position("pan") == pytest.approx(stopped_at, abs=0.01)
+    run(t, tmp_path)
+
+
+def test_homing_one_axis_while_another_parks(tmp_path):
+    """Home pan, then tilt while pan is still moving to its park position:
+    both end parked and neither homing fails with 'move interrupted'."""
+    async def t(ctrl):
+        first = asyncio.create_task(ctrl.home(["pan"]))
+        while not (ctrl.state["pan"].homed and ctrl.status()["motion"]):
+            await asyncio.sleep(0.02)
+        await ctrl.home(["tilt"])
+        await first                                       # no exception
+        await asyncio.sleep(0.1)
+        assert ctrl.position("pan") == pytest.approx(0, abs=0.1)
+        assert ctrl.position("tilt") == pytest.approx(0, abs=0.1)
+        assert ctrl.last_error == ""
+    run(t, tmp_path)

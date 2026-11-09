@@ -617,6 +617,7 @@ class MotionController:
             if self.estopped:
                 if self._traj is not None:
                     self._cancel_motion()
+                    self._cancel_jog(self.state.keys())
                 continue
             try:
                 self._stream_tick(now, dt)
@@ -729,11 +730,19 @@ class MotionController:
                 fut.set_exception(MotionError(f"move did not complete: {e}"))
 
     def _cancel_traj(self, handover: bool = False, quiet: bool = False) -> None:
+        """Drop the running trajectory. Its axes are handed to the jog
+        shapers at their streamed speed: they come to a smooth stop (or follow
+        the jog, with handover) unless a new trajectory takes them over or a
+        STOP / E-stop zeroes them. Never leave them at 0 silently: the board
+        would keep the last streamed velocity while other axes are streamed."""
         traj, fut = self._traj, self._traj_future
         self._traj, self._traj_kind, self._traj_future = None, "", None
         if traj is not None:
-            for n in traj.axes:      # continue smoothly from the streamed speed
-                self._shapers[n].reset(self._cmd_vel[n] if handover else 0.0)
+            for n in traj.axes:
+                self._shapers[n].reset(self._cmd_vel[n])
+                if not handover and self._cmd_vel[n] != 0.0:
+                    st = self.state[n]
+                    st.jog_active, st.jog_value = False, 0.0
         if fut is not None and not fut.done():
             if quiet:
                 fut.set_result(False)
@@ -903,7 +912,13 @@ class MotionController:
         if targets:
             log.info("moving to %s after homing",
                      ", ".join(f"{n} {t:g}" for n, t in targets.items()))
-            await self.goto(targets, wait=True)
+            if self._traj_kind == "park":
+                # another axis homed just before is still parking: one move
+                # takes both there (that homing ends quietly, not interrupted)
+                targets = {**self._traj.final, **targets}
+            traj = self._plan_move(targets)
+            if traj is not None:
+                await self._start_traj(traj, "park", replace=True)
 
     async def _home_axis(self, ax: AxisConfig) -> Optional[float]:
         """Home one axis. Returns where it should park (or None)."""
@@ -1275,7 +1290,7 @@ class MotionController:
             "lock": ({"owner": self.lock_owner, "label": self.lock_label}
                      if self.lock_owner else None),
             "sources": self.active_sources(),
-            "motion": self._traj_kind,
+            "motion": "move" if self._traj_kind == "park" else self._traj_kind,
             "playback": playback,
             "recording": self.recorder.state(),
             "limits": self.limits_status(),

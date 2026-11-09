@@ -147,6 +147,7 @@ class MotionController:
         self.last_error = ""
         self._last_status = 0.0
         self._homing: Set[str] = set()
+        self._raw: Dict[str, dict] = {}       # raw step moves running (wiring check)
         self._waiters: List[tuple] = []       # (axis_idx, types, future)
         self._tasks: List[asyncio.Task] = []
         link.on_status = self._on_status
@@ -806,7 +807,8 @@ class MotionController:
             return False
         for n in ("pan", "tilt"):
             if (n not in self.state or not self.state[n].homed or not self.axis_active[n]
-                    or n in self._homing or (traj is not None and n in traj.axes)):
+                    or n in self._homing or n in self._raw
+                    or (traj is not None and n in traj.axes)):
                 return False
         return True
 
@@ -825,6 +827,7 @@ class MotionController:
             if self._traj is not None and name in self._traj.axes:
                 self._cancel_motion()
             self._cancel_jog([name])
+            self._cancel_raw([name])
             self.axis_active[name] = False
             if self.ready:
                 await self.link.request("STOP", axis_mask=1 << ax.index)
@@ -897,7 +900,8 @@ class MotionController:
         if "zoom" in values and self.zoom_sign() < 0:    # +: zoom in (tele), any lens
             values = {**values, "zoom": -float(values["zoom"])}
         shaped = {n: self._shape(v) for n, v in values.items()
-                  if n in self.state and n not in self._homing and self.axis_active.get(n)}
+                  if n in self.state and n not in self._homing and n not in self._raw
+                  and self.axis_active.get(n)}
         if scale is not None:
             for n in shaped:
                 k = scale.get(n, 1.0) if isinstance(scale, dict) else scale
@@ -1002,7 +1006,7 @@ class MotionController:
         world: Dict[str, float] = {}
         for ax in self.axes:
             name = ax.name
-            if (traj is not None and name in traj.axes) or name in self._homing:
+            if (traj is not None and name in traj.axes) or name in self._homing or name in self._raw:
                 continue
             st, sh = self.state[name], self._shapers[name]
             mix = mixed and name in ("pan", "tilt")
@@ -1210,8 +1214,104 @@ class MotionController:
         await self.goto({n: self.position(n) + d for n, d in deltas.items()},
                         speed=speed, wait=wait)
 
+    # ================================================================ raw moves
+    RAW_MAX_STEPS = 10_000_000
+
+    async def raw_move(self, name: str, steps: int, speed: float,
+                       accel: Optional[float] = None, wait: bool = False) -> dict:
+        """Wiring check (mount dismantled): turn an axis by a number of
+        microsteps at `speed` microsteps/s, without homing, through the soft
+        limits and the travel. The axis loses its homing. The endstop guard
+        still halts it on its switch (moving toward the homing side). A move
+        sent while one runs adds to its target. Speed and acceleration are
+        capped by the axis's max_velocity / max_accel (MCU caps)."""
+        ax = self.axis(name)
+        self._check_ready()
+        if not self.axis_active[name]:
+            raise MotionError(f"{name} is off: switch it on first")
+        if name in self._homing:
+            raise MotionError(f"axis '{name}' is homing")
+        st = self.state[name]
+        if not st.flags & P.ST_ENABLED:
+            raise MotionError(f"{name} driver is not powered (motors off): power it first")
+        steps = int(steps)
+        if steps == 0 or abs(steps) > self.RAW_MAX_STEPS:
+            raise MotionError(f"steps must be 1..{self.RAW_MAX_STEPS:,} either way")
+        spu = ax.steps_per_unit
+        vcap, acap = ax.max_velocity * spu, ax.max_accel * spu
+        speed = float(speed)
+        if not speed > 0:
+            raise MotionError("speed must be above 0 steps/s")
+        v = min(speed, vcap)
+        a = acap if accel is None else min(max(float(accel), 1.0), acap)
+        guard = ((1 if ax.homing_positive_dir else -1)
+                 if ax.has_endstop and ax.endstop_guard else 0)
+        if guard and steps * guard > 0 and st.flags & (P.ST_ENDSTOP | P.ST_HALTED):
+            raise MotionError(f"{name} endstop is triggered: it only moves away from the "
+                              f"switch ({'-' if guard > 0 else '+'} steps)")
+        if self._traj is not None and name in self._traj.axes:
+            self._cancel_motion()
+        self._cancel_jog([name])
+        prev = self._raw.pop(name, None)
+        if prev is not None:
+            prev["task"].cancel()
+        start = prev["target"] if prev is not None else st.pos
+        target = start + steps
+        if st.homed:
+            log.info("%s: raw move, homing lost (home it again before use)", name)
+        st.homed = False
+        await self.link.request("SET_LIMITS", axis=ax.index, min=0, max=0, enabled=0)
+        fut = self._expect(ax.index, P.EV_MOVE_DONE, P.EV_ENDSTOP_HIT)
+        await self.link.request("MOVE_TO", axis=ax.index, target=target, max_vel=v, accel=a)
+        timeout = abs(target - st.pos) / v + 2.0 * v / a + 3.0
+        info = {"axis": name, "start": st.pos, "target": target, "speed": round(v, 1),
+                "accel": round(a, 1), "capped": speed > vcap, "result": None}
+        log.info("%s raw move %+d steps at %.0f steps/s%s (target %d)", name, steps, v,
+                 f" (capped by max_velocity {vcap:.0f})" if speed > vcap else "", target)
+        info["task"] = asyncio.get_running_loop().create_task(
+            self._raw_wait(name, ax, fut, info, timeout))
+        self._raw[name] = info
+        if wait:
+            await asyncio.wait([info["task"]])      # a Stop ends it: no exception
+        return {k: v for k, v in info.items() if k != "task"}
+
+    async def _raw_wait(self, name: str, ax: AxisConfig, fut: asyncio.Future,
+                        info: dict, timeout: float) -> None:
+        try:
+            ev = await asyncio.wait_for(fut, timeout)
+            if ev["type"] == P.EV_ENDSTOP_HIT:
+                info["result"] = "endstop"
+                log.warning("%s raw move halted by the endstop at %d steps", name, ev["value"])
+            else:
+                info["result"] = "done"
+                log.info("%s raw move done at %d steps", name, ev["value"])
+        except asyncio.TimeoutError:
+            info["result"] = "timeout"
+            log.warning("%s raw move did not finish in time: stopped", name)
+            try:
+                await self.link.request("STOP", axis_mask=1 << ax.index)
+            except Exception:  # noqa: BLE001
+                pass
+        except MotionError as e:
+            info["result"] = str(e)
+        except asyncio.CancelledError:
+            info["result"] = "stopped"
+            raise
+        finally:
+            if not fut.done():
+                fut.cancel()
+            if self._raw.get(name) is info:
+                del self._raw[name]
+
+    def _cancel_raw(self, names: Iterable[str]) -> None:
+        for n in names:
+            info = self._raw.pop(n, None)
+            if info is not None:
+                info["task"].cancel()
+
     async def stop(self, names: Optional[Iterable[str]] = None) -> None:
         names = list(names) if names else [a.name for a in self.axes]
+        self._cancel_raw(names)
         self._cancel_motion()
         self._cancel_jog(names)
         mask = 0
@@ -1220,6 +1320,7 @@ class MotionController:
         await self.link.request("STOP", axis_mask=mask)
 
     async def estop(self) -> None:
+        self._cancel_raw(list(self._raw))
         self._cancel_motion()
         if self.recorder.active:
             self.recorder.cancel()
@@ -1282,6 +1383,7 @@ class MotionController:
             if not on:
                 self.state[n].homed = False     # may move freely while unpowered
                 self._cancel_jog([n])
+                self._cancel_raw([n])
         await self.link.request("ENABLE", axis_mask=mask, enable_mask=mask if on else 0)
 
     # ================================================================ homing
@@ -1399,6 +1501,7 @@ class MotionController:
             raise MotionError(f"axis '{ax.name}' already homing")
         self._homing.add(ax.name)
         self._cancel_jog([ax.name])
+        self._cancel_raw([ax.name])
         st.homed = False
         spu = ax.steps_per_unit
         try:
@@ -1982,6 +2085,10 @@ class MotionController:
                 "vel": round(ax.to_units(st.vel), 4),
                 "homed": st.homed,
                 "homing": ax.name in self._homing,
+                "steps": st.pos,
+                "raw": ({k: v for k, v in self._raw[ax.name].items() if k != "task"}
+                        if ax.name in self._raw else None),
+                "halted": bool(f & P.ST_HALTED),
                 "enabled": bool(f & P.ST_ENABLED),
                 "moving": bool(f & P.ST_MOVING),
                 "endstop": bool(f & P.ST_ENDSTOP),

@@ -245,6 +245,13 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   `config/ptz.cfg` without modifying the repository, so `git pull` keeps
   working. "Reset to default" goes back to the repository file. If the edited
   file ever fails to load, the daemon starts with the default and says so.
+* **🔧 Axis debug** page (`/debug`), for checking a motor's wiring with the
+  mount dismantled: choose the axis, a number of microsteps (quick buttons:
+  1 full step, ¼ turn, 1 turn...) and a speed in steps/s, then *− steps* /
+  *+ steps*. No homing and no limits (the axis loses its homing); Stop or
+  Esc ends the move. It shows the step counter (with a zero), the endstop,
+  *Axis on* / *Driver powered* switches, and a TMC2209 check: UART answering,
+  open coil A / B, short to ground, temperature.
 * **Debug mode** (top right): verbose logging and a live console showing
   every command with its source, rejections, MCU events and endstop changes,
   plus a driver diagnostics button.

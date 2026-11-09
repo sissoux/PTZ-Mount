@@ -14,6 +14,8 @@ Motion
     {"cmd": "home", "axes": ["pan", "tilt"]}  (omitted: axes with home_with_all)
     {"cmd": "enable", "on": true}
     {"cmd": "axis_active", "axis": "zoom", "on": true}   switch an axis on / off live
+    {"cmd": "raw_move", "axis": "zoom", "steps": -3200, "speed": 800}
+        wiring check: microsteps at steps/s, no homing, soft limits off (axis unhomed)
 Soft limits (learned)
     {"cmd": "limit_set", "axis": "tilt", "side": "max"}   current position (or "value")
     {"cmd": "limit_clear", "axis": "tilt", "side": "max"}  (both: omit side; all: omit axis)
@@ -183,6 +185,9 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
                 _background(ctrl, ctrl.home(msg.get("axes")))
         elif cmd == "enable":
             await ctrl.enable(bool(msg.get("on", True)), msg.get("axes"))
+        elif cmd == "raw_move":
+            reply["raw"] = await ctrl.raw_move(msg["axis"], msg["steps"], msg["speed"],
+                                               msg.get("accel"), wait=wait)
         elif cmd == "axis_active":
             await ctrl.set_axis_active(msg["axis"], bool(msg.get("on", True)))
         # ------------------------------------------------ learned soft limits
@@ -348,6 +353,13 @@ def config_summary(ctrl: MotionController) -> dict:
             "max_velocity": a.max_velocity, "max_accel": a.max_accel,
             "jog_velocity": a.jog_velocity,
             "has_endstop": a.has_endstop, "steps_per_unit": a.steps_per_unit,
+            "microsteps": a.microsteps, "full_steps": a.full_steps_per_rotation,
+            "gear_ratio": a.gear_ratio, "rotation_distance": a.rotation_distance,
+            "max_accel_steps": a.max_accel * a.steps_per_unit,
+            "max_velocity_steps": a.max_velocity * a.steps_per_unit,
+            "homing_positive_dir": a.homing_positive_dir,
+            "endstop_guard": a.has_endstop and a.endstop_guard,
+            "run_current": a.tmc.run_current if a.tmc is not None else None,
             "home_with_all": a.home_with_all,
         } for a in ctrl.axes],
         "jog_timeout": ctrl.cfg.motion.jog_timeout,

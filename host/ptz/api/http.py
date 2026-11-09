@@ -66,6 +66,7 @@ class HttpServer:
             web.get("/", self._index),
             web.get("/settings", self._settings_page),
             web.get("/live", self._index),
+            web.get("/debug", self._debug_page),
             web.get("/api/config/file", self._cfg_get),
             web.post("/api/config/validate", self._cfg_validate),
             web.post("/api/config/file", self._cfg_save),
@@ -142,6 +143,9 @@ class HttpServer:
 
     async def _settings_page(self, request):
         return web.FileResponse(os.path.join(WEB_ROOT, "settings.html"))
+
+    async def _debug_page(self, request):
+        return web.FileResponse(os.path.join(WEB_ROOT, "debug.html"))
 
     # ------------------------------------------------------------ config editor
     def _denied(self, request):

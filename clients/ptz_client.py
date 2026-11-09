@@ -275,6 +275,14 @@ class PTZClient:
     async def axis_active(self, axis: str, on: bool) -> dict:
         return await self.call("axis_active", axis=axis, on=on)
 
+    async def raw_move(self, axis: str, steps: int, speed: float,
+                       accel: Optional[float] = None, wait: bool = False) -> dict:
+        """Wiring check: microsteps at microsteps/s, no homing, no limits."""
+        params = {"axis": axis, "steps": steps, "speed": speed, "wait": wait}
+        if accel is not None:
+            params["accel"] = accel
+        return (await self.call("raw_move", **params))["raw"]
+
     # soft limits
     async def limit_set(self, axis: str, side: str, value: Optional[float] = None) -> float:
         """side: "min" or "max". Without value: the current head position.

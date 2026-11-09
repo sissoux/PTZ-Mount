@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PTZ Axis debug</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    main.dbg { display: grid; gap: 16px; padding: 16px; max-width: 1100px; margin: 0 auto;
+               grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+    .dbg .wide { grid-column: 1 / -1; }
+    .warn-box { border-color: var(--warn); color: #f0c674; font-size: 13px; }
+    .counter { font: 600 40px/1.1 ui-monospace, "Cascadia Mono", Consolas, monospace;
+               font-variant-numeric: tabular-nums; }
+    .sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .flags { margin-top: 10px; display: flex; gap: 4px; flex-wrap: wrap; }
+    .flag.bad { background: var(--danger); color: #fff; }
+    .field { display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center; margin-top: 10px; }
+    .field input { width: 100%; background: #15171a; color: var(--text); border: 1px solid var(--line);
+                   border-radius: 6px; padding: 7px 8px; font: inherit; }
+    .field .eq { grid-column: 2; color: var(--muted); font-size: 12px; margin-top: -4px; }
+    .quick { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 2; }
+    .moves { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+    .moves button { padding: 16px 10px; font-size: 16px; font-weight: 600; }
+    .moves .stop { grid-column: 1 / -1; background: var(--danger); border: none; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+    .kv span:nth-child(odd) { color: var(--muted); }
+    .result { margin-top: 10px; font-size: 13px; min-height: 1.4em; }
+    .result.ok { color: var(--ok); }
+    .result.bad { color: var(--danger); }
+    .diag td { font-size: 13px; }
+    .diag td:first-child { color: var(--muted); width: 45%; }
+    .diag .bad { color: var(--danger); font-weight: 600; }
+    .diag .good { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="btn small" href="/" style="margin-left:0">← Control</a>
+    <h1>Axis debug</h1>
+    <span id="conn" class="badge off">offline</span>
+    <select id="axis" title="Axis to test"></select>
+    <span id="error" class="error"></span>
+    <button id="btn-estop" class="estop">E-STOP</button>
+  </header>
+  <main class="dbg">
+    <section class="card wide warn-box">
+      Raw moves for checking the wiring: a number of microsteps at a speed, <b>without homing,
+      soft limits or travel limits</b>. The axis loses its homing; home it again before normal use.
+      Only the endstop still stops it, when moving toward the homing side.
+      Never plug or unplug a motor while its driver is powered: untick <i>Axis on</i> first.
+    </section>
+
+    <section class="card">
+      <h2>Position</h2>
+      <div class="counter" id="steps">-</div>
+      <div class="sub" id="steps-sub"></div>
+      <div class="row">
+        <button id="btn-zero" class="small" title="Count the steps from here (display only)">Zero the counter</button>
+        <span class="sub" id="rel"></span>
+      </div>
+      <div class="flags" id="flags"></div>
+      <div class="row">
+        <label><input id="chk-active" type="checkbox"> Axis on</label>
+        <label title="Driver powered: the motor holds its position. Off: it turns freely by hand.">
+          <input id="chk-enabled" type="checkbox"> Driver powered</label>
+      </div>
+      <p class="hint" id="power-hint"></p>
+    </section>
+
+    <section class="card">
+      <h2>Move</h2>
+      <div class="field">
+        <label for="in-steps">Steps</label>
+        <input id="in-steps" type="number" min="1" step="1" value="3200">
+        <div class="eq" id="eq-steps"></div>
+        <div class="quick" id="quick-steps"></div>
+      </div>
+      <div class="field">
+        <label for="in-speed">Speed (steps/s)</label>
+        <input id="in-speed" type="number" min="1" step="any" value="800">
+        <div class="eq" id="eq-speed"></div>
+        <div class="quick" id="quick-speed"></div>
+      </div>
+      <div class="field">
+        <label for="in-accel">Accel (steps/s²)</label>
+        <input id="in-accel" type="number" min="1" step="any" placeholder="axis max">
+      </div>
+      <div class="moves">
+        <button id="btn-minus">◀ − steps</button>
+        <button id="btn-plus">+ steps ▶</button>
+        <button id="btn-stop" class="stop">STOP</button>
+      </div>
+      <div class="result" id="result"></div>
+      <p class="hint" id="dir-hint"></p>
+    </section>
+
+    <section class="card">
+      <h2>Axis configuration</h2>
+      <div class="kv" id="cfg"></div>
+      <p class="hint">From the config file (⚙ Config). Speed and acceleration above are capped by
+        max_velocity / max_accel.</p>
+    </section>
+
+    <section class="card">
+      <h2>Driver check (TMC2209)</h2>
+      <div class="row" style="margin-top:0">
+        <button id="btn-diag">Read the driver</button>
+        <label class="sub"><input id="chk-auto" type="checkbox"> every second</label>
+      </div>
+      <table class="diag"><tbody id="diag"></tbody></table>
+      <p class="hint">Open load (coil A / B) is only reliable while the motor turns, at a
+        moderate speed (it is also reported at standstill or in stealthChop). Short to ground or
+        overtemperature: power off and check the wiring.</p>
+    </section>
+  </main>
+  <script src="/static/debug.js"></script>
+</body>
+</html>

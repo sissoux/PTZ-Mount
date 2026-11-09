@@ -1110,3 +1110,56 @@ def test_lens_focal_marks_and_max_tilt(tmp_path):
         assert not (await dispatch(ctrl, {"cmd": "lens_tilt_max"}))["ok"]
         assert not (await dispatch(ctrl, {"cmd": "goto", "focal": 50}))["ok"]
     run(t, tmp_path)
+
+
+def test_raw_move_wiring_check(tmp_path):
+    async def t(ctrl):
+        ax = ctrl.cfg.axes["tilt"]
+        # not homed: a raw move runs anyway, speed capped
+        s0 = ctrl.state["zoom"].pos
+        r = await ctrl.raw_move("zoom", 1500, 1e6, wait=True)
+        assert r["capped"] and r["result"] == "done"
+        await asyncio.sleep(0.05)
+        assert ctrl.state["zoom"].pos == s0 + 1500
+        assert not ctrl.status()["axes"]["zoom"]["raw"]
+        # homed: it loses its homing and goes through the soft limits
+        await ctrl.home(["tilt"])
+        assert ctrl.state["tilt"].homed
+        far = ax.to_steps(ax.position_max + 30) - ctrl.state["tilt"].pos
+        r = await ctrl.raw_move("tilt", far, 20000, wait=True)
+        assert r["result"] == "done" and not ctrl.state["tilt"].homed
+        await asyncio.sleep(0.05)
+        assert ctrl.position("tilt") == pytest.approx(ax.position_max + 30, abs=0.2)
+        assert ctrl.jog({"tilt": 1.0}) == ["tilt"]          # jog still needs homing
+        # moves sent while one runs add up; Stop ends it
+        s0 = ctrl.state["tilt"].pos
+        await ctrl.raw_move("tilt", 200000, 3000)
+        r = await ctrl.raw_move("tilt", 100000, 3000)
+        assert r["target"] == s0 + 300000
+        await asyncio.sleep(0.2)
+        await ctrl.stop(["tilt"])
+        await asyncio.sleep(0.3)
+        st = ctrl.status()["axes"]["tilt"]
+        assert st["raw"] is None and not st["moving"]
+        assert 0 < st["steps"] - s0 < 3000
+        # toward the switch: the endstop guard halts it, then only away from it
+        r = await ctrl.raw_move("tilt", -10_000_000, 20000, wait=True)
+        assert r["result"] == "endstop"
+        await asyncio.sleep(0.05)
+        with pytest.raises(MotionError, match="endstop"):
+            await ctrl.raw_move("tilt", -100, 1000)
+        r = await ctrl.raw_move("tilt", 500, 5000, wait=True)
+        assert r["result"] == "done"
+        # driver unpowered or axis off: refused
+        await ctrl.enable(False, ["zoom"])
+        await asyncio.sleep(0.05)
+        with pytest.raises(MotionError, match="not powered"):
+            await ctrl.raw_move("zoom", 100, 1000)
+        await ctrl.set_axis_active("zoom", False)
+        with pytest.raises(MotionError, match="off"):
+            await ctrl.raw_move("zoom", 100, 1000)
+        # through the command API
+        rep = await dispatch(ctrl, {"cmd": "raw_move", "axis": "pan", "steps": -800,
+                                    "speed": 4000, "wait": True})
+        assert rep["ok"] and rep["raw"]["result"] == "done"
+    run(t, tmp_path)

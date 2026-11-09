@@ -191,6 +191,9 @@ abridged:
 | `axes.<n>.endstop` | The switch is pressed |
 | `axes.<n>.at_limit` | The axis is held at, or braking toward, a soft limit |
 | `axes.<n>.active` | The axis is in use (see `axis_active`) |
+| `axes.<n>.steps` | Position in microsteps, as counted by the board |
+| `axes.<n>.raw` | The `raw_move` running on this axis (`null`: none): `start`, `target` (microsteps), `speed`, `accel` |
+| `axes.<n>.halted` | Stopped by its endstop (endstop guard): it only moves away from the switch |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
 | `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
 | `lens` | Zoom lenses (5.12). `current`: the lens fitted (`null`: none). `sign`: +1 when the motor's positive direction zooms in, -1 when it zooms out. `focal`: current focal length in mm (`null` without a lens or before homing). `tilt_adjust`: finding the lens's max tilt (tilt soft limits off). `tilt_range`: the configured tilt travel. Per lens: focal range, the zoom positions of its `wide` and `tele` ends, its focal `points` ([zoom position, focal]) and its `tilt_max` (`null`: soft limits). |
@@ -228,6 +231,7 @@ are accepted from everyone, even when another client holds the lock
 | `home` | `axes` (list, optional); `wait` | Homes the axes. By default: every active axis with `home_with_all`. Ends with one combined move to the park positions (0 by default). |
 | `enable` | `on` (bool); `axes` (optional) | Powers the drivers on or off. Off releases the motors and **clears homing**. |
 | `axis_active` | `axis`, `on` | Switches an axis on or off live (section 2). Switching on requires homing it. The setting is remembered. |
+| `raw_move` | `axis`, `steps` (microsteps, signed), `speed` (microsteps/s), `accel` (optional, microsteps/s²), `wait` | Wiring check (the **/debug** page): turns the axis by a number of microsteps **without homing, soft limits or travel limits**. The axis loses its homing. Speed and acceleration are capped by the axis's `max_velocity` / `max_accel`. The endstop still halts it when the switch is at the end of the travel (`endstop_guard`), moving toward the homing side; a move further toward the switch is then refused. A move sent while one runs adds to its target. `stop` ends it. The axis must be on and its driver powered. Reply: `raw` (`target`, `speed`, `capped`, and with `wait` the `result`: `"done"`, `"endstop"`, `"stopped"` or `"timeout"`) |
 
 Examples:
 
@@ -690,7 +694,7 @@ asyncio.run(main())
 | `lock()`, `unlock()` | Blocking mode. The lock is taken again automatically after a reconnection. |
 | `home(axes, wait=True)`, `goto(..., speed, wait)`, `move_rel(...)`, `preset(n, speed, wait)`, `save_preset(n, name)` | Motion |
 | `jog(**values)`, `JogStream(client, rate=25)` | Jog: one frame, or a continuous stream |
-| `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)` | |
+| `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)`, `raw_move(axis, steps, speed, accel=None, wait=False)` | |
 | `limit_set(axis, side, value=None)`, `limit_clear(axis=None, side=None)`, `limits_enable(on)` | Soft limits |
 | `level_set(pitch=None, roll=None)`, `level_enable(on)`, `level_mark()`, `level_clear()` | Base levelling (5.11) |
 | `lens_save(name, focal_min, focal_max, at, points=None)`, `lens_select(name)`, `lens_delete(name)`, `lenses()`, `zoom_focal(focal, wait=False)`, `lens_tilt_adjust(on)`, `lens_tilt_max(value=None, clear=False)` | Zoom lenses (5.12) |

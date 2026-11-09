@@ -306,3 +306,16 @@ body.live .car-btn b { font-size: 22px; }
 .lw-ends button { flex: 1; padding: 10px; }
 .lw-msg { color: var(--danger); font-size: 13px; min-height: 1.3em; margin-top: 8px; }
 .lw-foot { justify-content: flex-end; }
+
+/* ---- v0.12: lens max tilt, focal marks ---- */
+.lens-tilt { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+             font-size: 12px; color: var(--muted); margin-top: -4px; }
+.lens-tilt b { color: var(--text); margin-left: 4px; }
+.lens-tilt .lt-label { flex: 1; }
+.lens-tilt.adjusting { color: var(--warn); }
+.lt-hint { flex: 1 1 100%; color: var(--warn); }
+.lw-marks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.lw-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 100%; }
+.chip { display: inline-flex; align-items: center; gap: 2px; background: #15171a; border: 1px solid var(--line);
+        border-radius: 12px; padding: 1px 2px 1px 10px; font-size: 12px; }
+.chip button { border: none; background: none; padding: 0 6px; }

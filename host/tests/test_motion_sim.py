@@ -1026,7 +1026,7 @@ def test_zoom_lenses_both_ring_directions(tmp_path):
         assert r["ok"] and r["lens"]["wide"] == pytest.approx(50, abs=0.2) and r["lens"]["tele"] == 0
         assert ctrl.zoom_sign() == -1 and ctrl.status()["lens"]["focal"] == pytest.approx(24, abs=0.5)
         before = ctrl.position("zoom")
-        await jog_zoom(ctrl, 0.5)                     # zoom in: the motor turns backwards
+        await jog_zoom(ctrl, 0.1)                     # zoom in: the motor turns backwards
         assert ctrl.position("zoom") < before - 3
         f = ctrl.status()["lens"]["focal"]
         assert 24 < f < 105
@@ -1043,4 +1043,70 @@ def test_zoom_lenses_both_ring_directions(tmp_path):
         assert (await dispatch(ctrl, {"cmd": "lens_delete", "name": "Canon 24-105"}))["ok"]
         assert ctrl.lens is None and ctrl.zoom_sign() == 1
         assert not (await dispatch(ctrl, {"cmd": "lens_select", "name": "nope"}))["ok"]
+    run(t, tmp_path)
+
+
+def test_lens_focal_marks_and_max_tilt(tmp_path):
+    async def ok(ctrl, msg):
+        r = await dispatch(ctrl, msg)
+        assert r["ok"], r
+        return r
+
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt", "zoom"])
+        await ok(ctrl, {"cmd": "limit_set", "axis": "tilt", "side": "max", "value": 20})
+        await ok(ctrl, {"cmd": "limits_enable", "on": True})
+        await ctrl.goto({"zoom": 60}, wait=True)
+        kit = {"cmd": "lens_save", "name": "Kit 18-135", "focal_min": 18, "focal_max": 135, "at": "tele"}
+        r = await dispatch(ctrl, {**kit, "points": [[25, 50], [15, 85]]})       # wrong order
+        assert not r["ok"] and "order" in r["error"]
+        assert not (await dispatch(ctrl, {**kit, "points": [[15, 150]]}))["ok"]  # beyond max
+        await ok(ctrl, {**kit, "points": [[10, 35], [20, 50], [40, 85]]})
+        assert ctrl.focal_to_position(50) == pytest.approx(20, abs=0.05)
+        assert ctrl.focal_to_position(110) == pytest.approx(50, abs=0.05)            # 85..135: 40..60
+        assert ctrl.focal_to_position(26.5) == pytest.approx(5, abs=0.05)            # 18..35: 0..10
+        await ok(ctrl, {"cmd": "zoom_focal", "focal": 85, "wait": True})
+        assert ctrl.position("zoom") == pytest.approx(40, abs=0.2)
+        assert ctrl.status()["lens"]["focal"] == pytest.approx(85, abs=0.5)
+        await ok(ctrl, {"cmd": "goto", "pan": 10, "focal": 35, "wait": True})
+        assert ctrl.position("zoom") == pytest.approx(10, abs=0.2)
+        assert ctrl.position("pan") == pytest.approx(10, abs=0.1)
+
+        # max tilt with this lens: soft limits off while adjusting, the
+        # lens's max then replaces the soft max, never past the config
+        assert ctrl.limits_of("tilt") == (-45, 20)
+        await ok(ctrl, {"cmd": "lens_tilt_adjust", "on": True})
+        assert ctrl.limits_of("tilt") == (-45, 90) and ctrl.status()["lens"]["tilt_adjust"]
+        await ctrl.goto({"tilt": 50}, wait=True)
+        assert ctrl.position("tilt") == pytest.approx(50, abs=0.1)
+        r = await ok(ctrl, {"cmd": "lens_tilt_max"})
+        assert r["tilt_max"] == pytest.approx(50, abs=0.1) and not ctrl.tilt_adjust
+        assert ctrl.limits_of("tilt")[1] == pytest.approx(50, abs=0.1)
+        assert (await ok(ctrl, {"cmd": "lens_tilt_max", "value": 200}))["tilt_max"] == 90
+        await ok(ctrl, {"cmd": "lens_tilt_max", "value": 40})
+        await ok(ctrl, {"cmd": "lens_tilt_adjust", "on": True})
+        await ctrl.goto({"tilt": 70}, wait=True)
+        await ok(ctrl, {"cmd": "lens_tilt_adjust", "on": False})          # cancel: back inside
+        for _ in range(200):
+            if ctrl._traj is None:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.3)                                          # final correction
+        assert ctrl.position("tilt") == pytest.approx(40, abs=0.2)
+        await ctrl.goto({"tilt": 80}, wait=True)                          # clamped
+        assert ctrl.position("tilt") <= 40.2
+
+        # learned again / renamed: marks replaced, max tilt kept
+        await ok(ctrl, {"cmd": "lens_save", "name": "Kit", "rename_from": "Kit 18-135",
+                        "focal_min": 18, "focal_max": 135, "wide": 0, "tele": 60})
+        st = ctrl.status()["lens"]
+        assert [x["name"] for x in st["list"]] == ["Kit"]
+        assert st["list"][0]["tilt_max"] == 40 and st["list"][0]["points"] == []
+        saved = json.loads((tmp_path / "settings.json").read_text())
+        assert saved["lenses"]["Kit"]["tilt_max"] == 40
+        await ok(ctrl, {"cmd": "lens_tilt_max", "clear": True})
+        assert ctrl.limits_of("tilt") == (-45, 20)
+        await ok(ctrl, {"cmd": "lens_select", "name": None})
+        assert not (await dispatch(ctrl, {"cmd": "lens_tilt_max"}))["ok"]
+        assert not (await dispatch(ctrl, {"cmd": "goto", "focal": 50}))["ok"]
     run(t, tmp_path)

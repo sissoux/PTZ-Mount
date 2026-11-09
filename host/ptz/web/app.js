@@ -286,7 +286,8 @@ function renderStatus(s) {
   lastStatusError = s.error;
   for (const [name, a] of Object.entries(s.axes)) {
     const p = $(`pos-${name}`); if (!p) continue;
-    p.textContent = fmtPos(a.pos, a.units);
+    p.textContent = name === "zoom" && s.lens && s.lens.focal != null
+      ? `${Math.round(s.lens.focal)} mm` : fmtPos(a.pos, a.units);
     $(`vel-${name}`).textContent = `${a.vel.toFixed(1)} ${a.units}/s`;
     $(`st-${name}`).innerHTML = flag("homed", a.homed) + flag("on", a.enabled)
       + flag("endstop", a.endstop, "warn") + (a.homing ? flag("homing", true, "warn") : "")
@@ -651,7 +652,7 @@ $("btn-car-add").onclick = followTyped;
 $("car-add").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); followTyped(); } };
 
 // ------------------------------------------------------------ zoom lenses
-let lensWizardOpen = false, lensPrev = null;
+let lensWizardOpen = false, lensPrev = null, lensEdit = null, lwPoints = [];
 function zoomEnds(zc) {
   const l = status && status.lens && status.lens.list.find((x) => x.name === status.lens.current);
   return l ? [l.wide, l.tele] : [zc.min, zc.max];
@@ -667,6 +668,28 @@ function renderLens(lens, za) {
     sel.dataset.key = key;
   }
   $("btn-lens-edit").disabled = $("btn-lens-del").disabled = !lens.current;
+  const cur = lens.list.find((l) => l.name === lens.current);
+  const gz = $("goto-zoom");
+  if (gz) {
+    gz.placeholder = cur ? "mm" : "";
+    gz.title = cur ? `focal length, ${cur.focal_min}..${cur.focal_max} mm` : "";
+  }
+  $("lens-tilt").classList.toggle("hidden", !cur || !lens.tilt_range);
+  if (cur && lens.tilt_range) {
+    const tu = (axisCfg("tilt") || {}).units;
+    $("lens-tilt-val").textContent = cur.tilt_max == null ? "none (soft limits)" : fmtPos(cur.tilt_max, tu);
+    const adj = lens.tilt_adjust;
+    $("btn-lt-adjust").classList.toggle("hidden", adj);
+    $("btn-lt-record").classList.toggle("hidden", !adj);
+    $("btn-lt-cancel").classList.toggle("hidden", !adj);
+    $("btn-lt-clear").classList.toggle("hidden", adj || cur.tilt_max == null);
+    $("lens-tilt-hint").classList.toggle("hidden", !adj);
+    $("lens-tilt-hint").textContent = `Tilt soft limits off: jog the tilt to the lowest safe position `
+      + `(no further than ${fmtPos(lens.tilt_range[1], tu)}, the configured travel), then Record.`;
+    $("lens-tilt").classList.toggle("adjusting", adj);
+    const lm = $("lim-tilt-max");
+    if (lm && cur.tilt_max != null) lm.textContent = `${fmtPos(cur.tilt_max, tu)} (lens)`;
+  }
   $("lens-info").textContent = lens.focal != null ? `${Math.round(lens.focal)} mm` : "";
   if (lens.focal != null && $("ro-val-zoom")) $("ro-val-zoom").textContent = `${Math.round(lens.focal)} mm`;
   if (lensWizardOpen && za) renderLensWizard(za);
@@ -681,6 +704,10 @@ $("lens-select").onchange = () => {
   }
 };
 $("btn-lens-edit").onclick = () => openLensWizard(status.lens.current);
+$("btn-lt-adjust").onclick = () => send({ cmd: "lens_tilt_adjust", on: true, id: "lta" });
+$("btn-lt-cancel").onclick = () => send({ cmd: "lens_tilt_adjust", on: false, id: "lta" });
+$("btn-lt-record").onclick = () => send({ cmd: "lens_tilt_max", id: "ltm" });
+$("btn-lt-clear").onclick = () => send({ cmd: "lens_tilt_max", clear: true, id: "ltm" });
 $("btn-lens-del").onclick = () => {
   const n = status.lens.current;
   if (n && confirm(`Forget the lens "${n}"?`)) send({ cmd: "lens_delete", name: n, id: "ld" });
@@ -698,6 +725,10 @@ function openLensWizard(name) {
   $("lw-fmin").value = l ? l.focal_min : "";
   $("lw-fmax").value = l ? l.focal_max : "";
   $("lw-msg").textContent = "";
+  lensEdit = l;
+  lwPoints = l ? (l.points || []).map((p) => [p[0], p[1]]) : [];
+  renderLwMarks();
+  $("lw-keep").classList.toggle("hidden", !l);
   const big = niceStep((zc.max - zc.min) / 25), steps = [big, niceStep(big / 5), niceStep(big / 25)];
   const u = zc.units === "°" ? "°" : ` ${zc.units}`;
   $("lw-steps").innerHTML = `<span class="muted">back to the endstop</span>`
@@ -728,18 +759,38 @@ function renderLensWizard(za) {
   $("lw-steps").querySelectorAll("button").forEach((b) => { b.disabled = !ready; });
   $("lw-tele").disabled = $("lw-wide").disabled = !ready;
 }
+function renderLwMarks() {
+  const sorted = [...lwPoints].sort((a, b) => a[1] - b[1]);
+  $("lw-marks").innerHTML = sorted.map((p) => `<span class="chip">${p[1]} mm
+      <button class="small ghost" data-f="${p[1]}" title="Remove this mark">×</button></span>`).join("");
+  $("lw-marks").querySelectorAll("[data-f]").forEach((b) => {
+    b.onclick = () => { lwPoints = lwPoints.filter((p) => p[1] !== parseFloat(b.dataset.f)); renderLwMarks(); };
+  });
+}
+$("lw-mark").onclick = () => {
+  const f = parseFloat($("lw-mark-f").value), za = status.axes.zoom;
+  if (!(f > 0)) { $("lw-msg").textContent = "Type the focal length printed on the barrel, in mm"; return; }
+  if (!za || !za.homed) { $("lw-msg").textContent = "Home the zoom first"; return; }
+  lwPoints = lwPoints.filter((p) => p[1] !== f).concat([[za.pos, f]]);
+  $("lw-mark-f").value = "";
+  $("lw-msg").textContent = "";
+  renderLwMarks();
+};
+$("lw-mark-f").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("lw-mark").click(); } };
 $("lw-on").onclick = () => setAxisActive("zoom", true);
 $("lw-home").onclick = () => send({ cmd: "home", axes: ["zoom"], id: "lwh" });
 $("lw-cancel").onclick = () => closeLensWizard(true);
-for (const at of ["tele", "wide"]) {
-  $(`lw-${at}`).onclick = () => {
-    const name = $("lw-name").value.trim();
-    const fmin = parseFloat($("lw-fmin").value), fmax = parseFloat($("lw-fmax").value);
-    if (!name) { $("lw-msg").textContent = "Give the lens a name"; return; }
-    if (!(fmin > 0 && fmax > fmin)) { $("lw-msg").textContent = "Min focal must be above 0 and below max focal"; return; }
-    send({ cmd: "lens_save", name, focal_min: fmin, focal_max: fmax, at, id: "lsave" });
-  };
+function lensSave(extra) {
+  const name = $("lw-name").value.trim();
+  const fmin = parseFloat($("lw-fmin").value), fmax = parseFloat($("lw-fmax").value);
+  if (!name) { $("lw-msg").textContent = "Give the lens a name"; return; }
+  if (!(fmin > 0 && fmax > fmin)) { $("lw-msg").textContent = "Min focal must be above 0 and below max focal"; return; }
+  const msg = { cmd: "lens_save", name, focal_min: fmin, focal_max: fmax, points: lwPoints, id: "lsave", ...extra };
+  if (lensEdit && lensEdit.name !== name) msg.rename_from = lensEdit.name;
+  send(msg);
 }
+for (const at of ["tele", "wide"]) $(`lw-${at}`).onclick = () => lensSave({ at });
+$("lw-keep").onclick = () => lensSave({ wide: lensEdit.wide, tele: lensEdit.tele });
 
 // ------------------------------------------------------------ live view
 function setLive(on) {
@@ -1161,9 +1212,10 @@ $("btn-disable").onclick = () => {
 };
 $("btn-goto").onclick = () => {
   const msg = { cmd: "goto", id: "go" };
+  const focal = status && status.lens && status.lens.current;   // zoom field in mm
   for (const a of config.axes) {
     const v = $(`goto-${a.name}`).value;
-    if (v !== "") msg[a.name] = parseFloat(v);
+    if (v !== "") msg[a.name === "zoom" && focal ? "focal" : a.name] = parseFloat(v);
   }
   send(msg);
 };

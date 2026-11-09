@@ -307,10 +307,12 @@ class PTZClient:
         return await self.call("level_clear")
 
     # zoom lenses
-    async def lens_save(self, name: str, focal_min: float, focal_max: float, at: str) -> dict:
-        """Zoom homed then moved to the other end of the ring; at: "tele" or "wide"."""
+    async def lens_save(self, name: str, focal_min: float, focal_max: float, at: str,
+                        points: Optional[list] = None) -> dict:
+        """Zoom homed then moved to the other end of the ring; at: "tele" or
+        "wide". points: [[zoom position, focal], ...] marks on the way."""
         return (await self.call("lens_save", name=name, focal_min=focal_min,
-                                focal_max=focal_max, at=at))["lens"]
+                                focal_max=focal_max, at=at, points=points or []))["lens"]
 
     async def lens_select(self, name: Optional[str]) -> dict:
         return await self.call("lens_select", name=name)
@@ -323,6 +325,15 @@ class PTZClient:
 
     async def zoom_focal(self, focal: float, wait: bool = False) -> dict:
         return await self.call("zoom_focal", focal=focal, wait=wait)
+
+    async def lens_tilt_adjust(self, on: bool) -> dict:
+        """Tilt free (soft limits off) to find the lens's max tilt."""
+        return await self.call("lens_tilt_adjust", on=on)
+
+    async def lens_tilt_max(self, value: Optional[float] = None, clear: bool = False) -> Optional[float]:
+        """Max tilt with this lens: the current tilt by default."""
+        params = {"clear": True} if clear else ({"value": value} if value is not None else {})
+        return (await self.call("lens_tilt_max", **params))["tilt_max"]
 
     async def shutdown(self, poweroff: bool = True) -> dict:
         """Rest position, motors off, files flushed, Pi powered off. Returns

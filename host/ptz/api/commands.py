@@ -28,7 +28,12 @@ Zoom lenses (the zoom drive turns the lens's zoom ring)
      "at": "tele"}           learning: zoom homed, then moved to the other end of the
                              ring; "at": the end it is at now ("tele" or "wide")
     {"cmd": "lens_select", "name": "Sony 70-200"}   (null: none)   {"cmd": "lens_delete", "name": "..."}
+    "points": [[12.5, 35], [20.1, 50]]   optional marks: [zoom position, focal]
     {"cmd": "zoom_focal", "focal": 135}     zoom to a focal length (mm), lens selected
+    {"cmd": "goto", "pan": 10, "focal": 85}  same, with other axes in one move
+    {"cmd": "lens_tilt_adjust", "on": true}  tilt free (soft limits off) to find the max
+    {"cmd": "lens_tilt_max"}         max tilt with this lens = current tilt ("value": x;
+                                     "clear": true -> soft limits again)
     With a lens selected, a positive zoom jog always zooms in, whatever the
     direction of its ring, and the zoom stays between the ring's two ends.
 Shutdown
@@ -157,8 +162,10 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             if refused:
                 return _fail(cmd, f"{', '.join(refused)} not homed: home first", quiet=True)
         elif cmd == "goto":
-            await ctrl.goto(_axis_values(ctrl, msg), speed=float(msg.get("speed", 1.0)),
-                            wait=wait)
+            targets = _axis_values(ctrl, msg)
+            if msg.get("focal") is not None:
+                targets["zoom"] = ctrl.focal_to_position(msg["focal"])
+            await ctrl.goto(targets, speed=float(msg.get("speed", 1.0)), wait=wait)
         elif cmd == "move_rel":
             await ctrl.move_relative(_axis_values(ctrl, msg),
                                      speed=float(msg.get("speed", 1.0)), wait=wait)
@@ -195,13 +202,19 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
         elif cmd == "lens_save":
             reply["lens"] = await ctrl.lens_save(msg.get("name"), msg.get("focal_min"),
                                                  msg.get("focal_max"), msg.get("at"),
-                                                 msg.get("wide"), msg.get("tele"))
+                                                 msg.get("wide"), msg.get("tele"),
+                                                 msg.get("points"), msg.get("rename_from"))
         elif cmd == "lens_select":
             await ctrl.lens_select(msg.get("name"))
         elif cmd == "lens_delete":
             await ctrl.lens_delete(msg.get("name"))
         elif cmd == "lenses":
             reply["lens"] = ctrl.lens_status()
+        elif cmd == "lens_tilt_adjust":
+            await ctrl.lens_tilt_adjust(bool(msg.get("on", True)))
+        elif cmd == "lens_tilt_max":
+            reply["tilt_max"] = await ctrl.lens_tilt_max(msg.get("value"),
+                                                         bool(msg.get("clear", False)))
         elif cmd == "zoom_focal":
             await ctrl.zoom_to_focal(msg["focal"], speed=float(msg.get("speed", 1.0)), wait=wait)
         elif cmd == "level_clear":

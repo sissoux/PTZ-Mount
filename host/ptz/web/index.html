@@ -65,6 +65,14 @@
           <button id="btn-lens-del" class="small" title="Forget this lens">🗑</button>
           <span id="lens-info" class="lens-info"></span>
         </div>
+        <div id="lens-tilt" class="lens-tilt hidden">
+          <span class="lt-label">Max tilt with this lens <b id="lens-tilt-val"></b></span>
+          <button id="btn-lt-adjust" class="small" title="Free the tilt (soft limits off, up to the configured travel) to find how low the camera may go with this lens">Adjust</button>
+          <button id="btn-lt-record" class="small hidden">Record max tilt here</button>
+          <button id="btn-lt-cancel" class="small ghost hidden">Cancel</button>
+          <button id="btn-lt-clear" class="small ghost" title="No max tilt for this lens: the soft limits apply">Clear</button>
+          <div id="lens-tilt-hint" class="lt-hint hidden"></div>
+        </div>
         <div class="motion-settings">
           <div id="simple-sliders" class="sliders">
             <label for="speed">Speed</label>
@@ -397,6 +405,12 @@
       <h3>2 · Turn the ring to its other end</h3>
       <div class="lw-pos">Zoom position: <b id="lw-pos">-</b> <span class="muted">from the endstop</span></div>
       <div id="lw-steps" class="lw-steps"></div>
+      <div class="lw-marks">
+        <span class="muted">Focal marks (optional): at each focal printed on the barrel,</span>
+        <input id="lw-mark-f" type="number" min="1" step="any" placeholder="mm" class="short">
+        <button id="lw-mark" class="small" title="The ring is at this focal length now">Mark here</button>
+        <div id="lw-marks" class="lw-chips"></div>
+      </div>
       <p class="hint">Move away from the endstop step by step until the ring reaches its other
         end; stop just before the motor forces. The zoom rocker also works (motor direction
         while learning).</p>
@@ -405,6 +419,7 @@
         <button id="lw-tele" title="The picture is zoomed in: max focal">Zoomed in (tele, max focal)</button>
         <button id="lw-wide" title="The picture is zoomed out: min focal">Zoomed out (wide, min focal)</button>
       </div>
+      <div class="row"><button id="lw-keep" class="small hidden" title="Save the name, focal lengths and marks; keep the ends learned before">Keep the ends learned before</button></div>
       <div id="lw-msg" class="lw-msg"></div>
       <div class="row lw-foot"><button id="lw-cancel" class="small ghost">Cancel</button></div>
     </div>

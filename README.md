@@ -194,10 +194,17 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
 * **Lens** (under the pad): choose the lens fitted. Zoom up / T, PgUp and
   VISCA tele then always zoom in, whichever way the lens's ring turns
   (Sony and Canon turn opposite ways), the zoom stops at the ring's two
-  ends, and the zoom readout shows the focal length. *+ Learn a new lens…*
-  asks for its name and min / max focal, homes the zoom (the endstop is one
-  end of the ring), then you step the ring to its other end and say
-  whether the picture is now zoomed in or out. ✎ learns the lens again.
+  ends, and the zoom shows as a focal length (readout, axes table; *Go to*
+  takes mm). *+ Learn a new lens…* asks for its name and min / max focal,
+  homes the zoom (the endstop is one end of the ring), then you step the
+  ring to its other end and say whether the picture is now zoomed in or
+  out. On the way, *Mark here* the focal lengths printed on the barrel
+  (18-135: 35, 50, 85): the focal length is interpolated between them.
+  ✎ edits the lens (*Keep the ends learned before* to only change the name,
+  focals or marks).
+  *Max tilt with this lens*: *Adjust* frees the tilt (soft limits off, up
+  to the configured travel), jog to the lowest safe tilt, *Record max tilt
+  here*. While that lens is selected it replaces the soft limit's tilt max.
 * **Base level** (middle column), for a mount standing at an angle: aim the
   camera level (its electronic level at 0, or the horizon centred) and press
   *Mark level here*, at two pan angles at least 30° apart, then tick *Level

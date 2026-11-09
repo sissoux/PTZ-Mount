@@ -95,10 +95,13 @@ class MotionController:
         self.level_pitch = 0.0
         self.level_roll = 0.0
         self.level_marks: List[Tuple[float, float]] = []    # (pan, tilt) aimed level
-        # zoom lenses: name -> {"focal_min", "focal_max", "wide", "tele"}
-        # (wide / tele: zoom axis position at each end of the ring)
+        # zoom lenses: name -> {"focal_min", "focal_max", "wide", "tele",
+        # "points", "tilt_max"} (wide / tele: zoom axis position at each end of
+        # the ring; points: [position, focal] marks in between; tilt_max: the
+        # lowest the camera may tilt with this lens on, None: soft limits)
         self.lenses: Dict[str, dict] = {}
         self.lens: Optional[str] = None             # lens fitted (None: raw motor)
+        self.tilt_adjust = False                    # finding the lens's max tilt
         # multi-car race: the car list (in the timing software's order), the
         # car followed, and the lap times of every car seen
         self.cars: Dict[int, dict] = {}
@@ -380,8 +383,12 @@ class MotionController:
         for name, d in (data.get("lenses") or {}).items():
             if isinstance(d, dict) and all(isinstance(d.get(k), num) for k in
                                            ("focal_min", "focal_max", "wide", "tele")):
-                self.lenses[str(name)] = {k: float(d[k]) for k in
-                                          ("focal_min", "focal_max", "wide", "tele")}
+                lens = {k: float(d[k]) for k in ("focal_min", "focal_max", "wide", "tele")}
+                lens["points"] = [[float(p[0]), float(p[1])] for p in d.get("points") or []
+                                  if isinstance(p, list) and len(p) == 2
+                                  and all(isinstance(x, num) for x in p)]
+                lens["tilt_max"] = float(d["tilt_max"]) if isinstance(d.get("tilt_max"), num) else None
+                self.lenses[str(name)] = lens
         if data.get("lens") in self.lenses:
             self.lens = data["lens"]
         lev = data.get("level") or {}
@@ -470,12 +477,19 @@ class MotionController:
         soft limits when they are enabled."""
         ax = self.cfg.axes[name]
         lo, hi = ax.position_min, ax.position_max
+        if name == "tilt" and self.tilt_adjust:
+            return lo, hi                            # finding the lens's max tilt
+        lens = self._lens()
+        lens_tilt = lens.get("tilt_max") if lens is not None and name == "tilt" else None
         if self.user_limits_on:
             u = self.user_limits[name]
             if u["min"] is not None:
                 lo = max(lo, u["min"])
-            if u["max"] is not None:
+            if u["max"] is not None and lens_tilt is None:   # the lens's max replaces it
                 hi = min(hi, u["max"])
+        if lens_tilt is not None:
+            hi = min(hi, lens_tilt)
+            lo = min(lo, hi)
         if name == "zoom" and self._lens() is not None:
             w, t = self.zoom_ends()                  # the ring's end stops
             lo, hi = max(lo, min(w, t)), min(hi, max(w, t))
@@ -603,27 +617,55 @@ class MotionController:
         await self.goto({"zoom": w + clamp(float(frac), 0.0, 1.0) * (t - w)},
                         speed=speed, wait=wait)
 
+    @staticmethod
+    def _focal_curve(lens: dict) -> List[Tuple[float, float]]:
+        """(fraction wide -> tele, focal) through the ends and the marks."""
+        w, t = lens["wide"], lens["tele"]
+        mid = sorted(((p - w) / (t - w), f) for p, f in lens.get("points") or [])
+        return [(0.0, lens["focal_min"])] + mid + [(1.0, lens["focal_max"])]
+
+    @staticmethod
+    def _interp(curve: List[Tuple[float, float]], x: float, i: int, j: int) -> float:
+        """Piecewise linear: value j at value i = x along the curve."""
+        x = clamp(x, curve[0][i], curve[-1][i])
+        for a, b in zip(curve, curve[1:]):
+            if x <= b[i]:
+                k = (x - a[i]) / (b[i] - a[i]) if b[i] != a[i] else 0.0
+                return a[j] + k * (b[j] - a[j])
+        return curve[-1][j]
+
     def focal_now(self) -> Optional[float]:
-        """Focal length (mm) of the lens fitted, linear along the ring."""
+        """Focal length (mm) of the lens fitted: interpolated between the
+        marks learned on the ring (linear between the ends without marks)."""
         lens = self._lens()
         if lens is None or "zoom" not in self.state or not self.state["zoom"].homed:
             return None
-        return lens["focal_min"] + self.zoom_fraction() * (lens["focal_max"] - lens["focal_min"])
+        return self._interp(self._focal_curve(lens), self.zoom_fraction(), 0, 1)
 
-    async def zoom_to_focal(self, focal: float, speed: float = 1.0, wait: bool = False) -> None:
+    def focal_to_position(self, focal: float) -> float:
         lens = self._lens()
         if lens is None:
             raise MotionError("no lens selected: choose the lens fitted first")
-        f = (float(focal) - lens["focal_min"]) / (lens["focal_max"] - lens["focal_min"])
-        await self.zoom_to_fraction(f, speed=speed, wait=wait)
+        try:
+            focal = float(focal)
+        except (TypeError, ValueError):
+            raise MotionError("focal must be a number (mm)") from None
+        frac = self._interp(self._focal_curve(lens), focal, 1, 0)
+        return lens["wide"] + frac * (lens["tele"] - lens["wide"])
+
+    async def zoom_to_focal(self, focal: float, speed: float = 1.0, wait: bool = False) -> None:
+        await self.goto({"zoom": self.focal_to_position(focal)}, speed=speed, wait=wait)
 
     async def lens_save(self, name: str, focal_min: float, focal_max: float,
                         at: Optional[str] = None, wide: Optional[float] = None,
-                        tele: Optional[float] = None) -> dict:
+                        tele: Optional[float] = None, points=None,
+                        rename_from: Optional[str] = None) -> dict:
         """Store a lens and select it. Learning: the zoom was homed (the ring
         at the endstop end) and moved to the other end of the ring; `at`
         says which end it is now at ("tele" or "wide"). Or give the wide /
-        tele positions directly."""
+        tele positions directly. points: [[zoom position, focal], ...]
+        marks in between (focal lengths printed on the barrel). The max
+        tilt of a lens learned again is kept."""
         name = str(name or "").strip()[:32]
         if not name:
             raise MotionError("the lens needs a name")
@@ -646,8 +688,29 @@ class MotionController:
         if abs(tele - wide) < 0.01 * (ax.position_max - ax.position_min):
             raise MotionError("the ring hardly moved: move the zoom to the other end of "
                               "the ring before saving")
+        marks: Dict[float, float] = {}
+        for p in points or []:
+            try:
+                pos, f = float(p[0]), float(p[1])
+            except (TypeError, ValueError, IndexError):
+                raise MotionError("points must be [zoom position, focal] pairs") from None
+            if not fmin < f < fmax:
+                raise MotionError(f"mark {f:g} mm: must be between {fmin:g} and {fmax:g} mm")
+            if not 0.0 < (pos - wide) / (tele - wide) < 1.0:
+                raise MotionError(f"mark {f:g} mm: not between the two ends of the ring")
+            marks[f] = round(pos, 3)                 # same focal marked again: the last
+        pts = sorted(([p, f] for f, p in marks.items()),
+                     key=lambda m: (m[0] - wide) / (tele - wide))
+        for a, b in zip(pts, pts[1:]):
+            if b[1] <= a[1]:
+                raise MotionError(f"marks {a[1]:g} and {b[1]:g} mm are in the wrong order "
+                                  "along the ring: mark them again")
+        old = self.lenses.get(name) or (self.lenses.get(rename_from) if rename_from else None)
         self.lenses[name] = {"focal_min": fmin, "focal_max": fmax,
-                             "wide": round(wide, 3), "tele": round(tele, 3)}
+                             "wide": round(wide, 3), "tele": round(tele, 3), "points": pts,
+                             "tilt_max": old.get("tilt_max") if old else None}
+        if rename_from and rename_from != name and rename_from in self.lenses:
+            del self.lenses[rename_from]
         log.info("lens '%s' %g-%g mm: wide at %.2f, tele at %.2f", name, fmin, fmax, wide, tele)
         await self.lens_select(name)
         return dict(self.lenses[name], name=name)
@@ -657,10 +720,52 @@ class MotionController:
         if name and name not in self.lenses:
             raise MotionError(f"unknown lens '{name}'")
         self.lens = name or None
+        self.tilt_adjust = False
         self._save_settings()
-        if "zoom" in self.state:
-            await self._apply_limits(["zoom"])
+        await self._apply_limits([n for n in ("zoom", "tilt") if n in self.state])
         log.info("lens: %s", self.lens or "none")
+
+    def _lens_tilt_check(self) -> dict:
+        lens = self._lens()
+        if lens is None:
+            raise MotionError("select the lens fitted first")
+        if "tilt" not in self.state:
+            raise MotionError("no tilt axis")
+        return lens
+
+    async def lens_tilt_adjust(self, on: bool) -> None:
+        """On: tilt free over its whole configured travel (soft limits and
+        the lens's max tilt off) to find how low the camera may tilt with
+        this lens. Off (cancel): limits back, the tilt returns inside them."""
+        self._lens_tilt_check()
+        self.tilt_adjust = bool(on)
+        await self._apply_limits(["tilt"])
+        log.info("lens max tilt: %s", "adjusting (tilt soft limits off)" if on else "adjust cancelled")
+        if not on and self.state["tilt"].homed:
+            lo, hi = self.limits_of("tilt")
+            pos = self.position("tilt")
+            if not lo <= pos <= hi:
+                await self.goto({"tilt": clamp(pos, lo, hi)})
+
+    async def lens_tilt_max(self, value: Optional[float] = None, clear: bool = False) -> Optional[float]:
+        """Max tilt with the lens fitted: the current tilt (or `value`),
+        never past the configured travel. clear: back to the soft limits."""
+        lens = self._lens_tilt_check()
+        ax = self.cfg.axes["tilt"]
+        if clear:
+            lens["tilt_max"] = None
+        else:
+            if value is None:
+                if not self.state["tilt"].homed:
+                    raise MotionError("tilt is not homed")
+                value = self.position("tilt")
+            lens["tilt_max"] = round(clamp(float(value), ax.position_min, ax.position_max), 3)
+        self.tilt_adjust = False
+        self._save_settings()
+        await self._apply_limits(["tilt"])
+        log.info("lens '%s' max tilt: %s", self.lens,
+                 "soft limits" if lens["tilt_max"] is None else f"{lens['tilt_max']:.2f}")
+        return lens["tilt_max"]
 
     async def lens_delete(self, name: str) -> None:
         if name not in self.lenses:
@@ -673,8 +778,11 @@ class MotionController:
 
     def lens_status(self) -> dict:
         f = self.focal_now() if "zoom" in self.cfg.axes else None
+        tilt = self.cfg.axes.get("tilt")
         return {"current": self.lens, "sign": self.zoom_sign(),
                 "focal": round(f, 1) if f is not None else None,
+                "tilt_adjust": self.tilt_adjust,
+                "tilt_range": [tilt.position_min, tilt.position_max] if tilt else None,
                 "list": [dict(v, name=k) for k, v in sorted(self.lenses.items())]}
 
     def level_clear(self) -> None:
@@ -852,13 +960,21 @@ class MotionController:
                 return pos
         return None
 
+    def _clamp_desired(self, name: str, p: float) -> float:
+        """Desired position as the MCU will allow it: inside the limits, or
+        on the way back in when the head starts outside them (limits just
+        narrowed, e.g. a lens's max tilt): no correction beyond the move."""
+        lo, hi = self.limits_of(name)
+        here = self.position(name)
+        return clamp(p, min(lo, here), max(hi, here))
+
     def _stream_tick(self, now: float, dt: float) -> None:
         mask, vels = 0, [0.0] * P.MAX_AXES
         traj = self._traj
         if traj is not None:
             traj.advance(dt)
             samples = traj.sample()
-            self._des_hist.append((now, {n: clamp(p, *self.limits_of(n))
+            self._des_hist.append((now, {n: self._clamp_desired(n, p)
                                          for n, (p, _) in samples.items()}))
             ref = None
             if now - self._last_status < 0.1:

@@ -96,8 +96,11 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
    lap uses the halfway value (17 s in use, 18 s measured: 17.5 s next).
    Intervals outside the tolerance are ignored, for example a crash, a slow
    lap, or a GO triggered by another car.
-6. **Several cars.** Click a car number (1..12) under *Car followed*, or let
-   the timing software do it: `{"cmd":"await_car","car":5}`. The head goes
+6. **Several cars.** Click a car under *Car followed* (or type its race
+   number), or let the timing software do it: `{"cmd":"await_car","car":5}`.
+   The list (12 cars at most) fills as cars are seen, or the software sends
+   it: `{"cmd":"cars_set","cars":[5,12,44]}`; *Flush car list* or
+   `cars_flush` empties it. The head goes
    to the start line and waits for that car's next crossing, which the
    software sends as `{"cmd":"lap","car":5}` (UDP or HTTP, like
    `track_go`). While **learning**, the lap in progress is dropped and the
@@ -108,6 +111,12 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
    and each car's last / best lap time is shown (*Names & lap times*, where
    cars can be named). Auto adjust measures each car on its own crossings,
    and switching to a car uses its own lap time.
+7. **🏁 Follow first** follows the leading car, whatever its number. The
+   leader is the car with the most crossings since *Reset lap times* (press
+   it at the start of the race), or the position the software sends with
+   each lap (`"position": 1`). When another car takes the lead it crosses
+   the line first, so the head switches to it right there: the crossing is
+   its GO (or its lap mark while learning). Clicking a car turns it off.
 
 ## Control interfaces
 
@@ -190,6 +199,10 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   level at pan 0 and at pan +90. Only jogging is corrected (presets and
   replays are exact mount positions); the picture's own roll cannot be
   removed by a pan / tilt head.
+* **▣ Live** (top right, or open `/live`, e.g. `http://<pi-address>:8080/live`): a
+  simpler page for the event with the jog pad, position, Home / Stop,
+  presets and race tracking only. ▣ Full goes back; the choice is
+  remembered by the browser.
 * **⏻ Shutdown** (top right): the head goes to its rest position (pan 0°,
   tilt at its max end, +32° here; `shutdown_position` per axis in the configuration), the
   motors are turned off, every file is flushed to the SD card and the Pi

@@ -261,3 +261,24 @@ body.editing { overflow: hidden; }
 .car-table td, .car-table th { padding: 2px 4px; text-align: left; }
 .car-table input { width: 100%; padding: 2px 6px; }
 .car-table tr.current td { color: var(--accent); font-weight: 600; }
+
+/* ---- v0.10: car tools, live view ---- */
+.car-tools { margin-top: 8px; gap: 8px; align-items: center; }
+#btn-follow-first.on { background: var(--ok); border-color: var(--ok); color: #fff; }
+.car-btn { position: relative; }
+.car-btn .pos { position: absolute; top: 2px; right: 4px; font-size: 9px; font-style: normal; color: var(--muted); }
+.car-btn.leader .pos { color: #f0b429; font-weight: 700; }
+.car-btn.current .pos { color: #fff; }
+.car-empty { grid-column: 1 / -1; font-size: 12px; margin: 4px 0; }
+.live-only { display: none !important; }
+body.live .live-only { display: flex !important; }
+.control .live-only { grid-column: 1 / -1; gap: 8px; }
+body.live .col-mid, body.live .recorder, body.live #debug-card, body.live .hint,
+body.live .adv, body.live #btn-track-edit, body.live .race-settings,
+body.live header a.btn, body.live .debug-toggle { display: none !important; }
+body.live header #btn-live { margin-left: auto; }
+body.live main.layout { grid-template-columns: minmax(420px, 560px) minmax(460px, 1fr); }
+body.live .col-right { grid-column: auto; display: flex; }
+body.live .readout .value { font-size: 30px; }
+body.live .car-btn b { font-size: 22px; }
+@media (max-width: 1000px) { body.live main.layout { grid-template-columns: 1fr; } }

@@ -342,9 +342,26 @@ class PTZClient:
             params["track"] = track
         return (await self.call("await_car", **params))["state"]
 
-    async def lap(self, car: Optional[int] = None) -> dict:
-        """This car crosses the start / finish line. Returns {"car", "action"}."""
-        return await self.call("lap", **({"car": car} if car is not None else {}))
+    async def lap(self, car: Optional[int] = None, position: Optional[int] = None) -> dict:
+        """This car crosses the start / finish line (position: its race
+        position, optional). Returns {"car", "action"}."""
+        params = {k: v for k, v in (("car", car), ("position", position)) if v is not None}
+        return await self.call("lap", **params)
+
+    async def follow_leader(self, on: bool = True) -> dict:
+        """Follow whoever leads the race (switches at the line)."""
+        return await self.call("follow_leader", on=on)
+
+    async def cars_set(self, cars: list) -> list:
+        """New car list: numbers, or {"car": n, "name": "..."} (12 at most)."""
+        return (await self.call("cars_set", cars=cars))["cars"]
+
+    async def cars(self) -> dict:
+        return (await self.call("cars"))["cars"]
+
+    async def cars_flush(self) -> dict:
+        """Forget every car (list, names, lap times)."""
+        return await self.call("cars_flush")
 
     async def car_name(self, car: int, name: str) -> dict:
         return await self.call("car_name", car=car, name=name)

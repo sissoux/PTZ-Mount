@@ -166,9 +166,9 @@ abridged:
  "shutdown": null,
  "lock": null, "sources": [], "playback": null, "recording": {"active": false},
  "tracking": {"phase": "idle", "track": null, "lap_time": null, "runs": 0, ...},
- "cars": {"current": 5, "waiting": true,
-          "list": [{"car": 1, "name": "", "laps": 4, "last_lap": 92.4, "best_lap": 91.8,
-                    "expected": 92.1, "since": 31.5}, ...]}}
+ "cars": {"current": 44, "waiting": true, "follow_leader": true, "leader": 44, "max": 12,
+          "list": [{"car": 44, "name": "", "laps": 4, "last_lap": 92.4, "best_lap": 91.8,
+                    "expected": 92.1, "crossings": 5, "position": 1, "since": 31.5}, ...]}}
 ```
 
 | Field | Meaning |
@@ -194,7 +194,7 @@ abridged:
 | `sources` | UDP / VISCA senders seen in the last 10 s |
 | `playback` | `null`, or `{"name", "phase": "positioning"/"playing", "progress": 0..1, "loop", "pass", "duration"}` |
 | `recording` | `{"active": false}`, or `{"active": true, "armed", "mode", "points", "elapsed"}`, plus `marks`, `laps`, `lap_elapsed` and `last_lap` in laps mode |
-| `cars` | Several cars (5.6.1). `current`: the car followed (`null`: none, every lap signal counts). `waiting`: the head waits at the line for its next crossing. Per car: `laps`, `last_lap`, `best_lap` (s), `expected` (smoothed lap time, used as the target lap when switching to that car with auto adjust), `since` (s since its last crossing, `null` if never seen). |
+| `cars` | Several cars (5.6.1). `list`: the car list, in the order it was sent or seen (12 cars at most). `current`: the car followed (`null`: none, every lap signal counts). `waiting`: the head waits at the line for its next crossing. `follow_leader`: following whoever leads; `leader`: the car leading (`null` before any crossing). Per car: `laps`, `last_lap`, `best_lap` (s), `expected` (smoothed lap time, used as the target lap when switching to that car with auto adjust), `crossings` (since the last reset), `position` (race position, `null` before its first crossing), `since` (s since its last crossing, `null` if never seen). |
 | `tracking` | `{"phase": "idle"/"arming"/"armed"/"running"/"done", "track", "lap_time", "current_lap", "speed", "speed_eff", "target_lap", "auto_rearm", "auto_adjust", "adjust_tolerance", "runs", "last_interval", "adjust_note", "progress"}` |
 
 To know when something has finished without `wait`, watch the status:
@@ -336,16 +336,38 @@ next GO (`phase` `"armed"`).
 #### 5.6.1 Several cars (timing software)
 
 The mount does not know which car is which: the timing software tells it
-which car the operator follows (up to 12, numbered 1..12) and sends a
-`lap` each time a car crosses the start / finish line. Only the car
-followed drives the head; the lap times of every car are kept.
+which car the operator follows and sends a `lap` each time a car crosses
+the start / finish line. Only the car followed drives the head; the lap
+times of every car are kept.
+
+Car numbers are race numbers, 1..999. The mount keeps a list of up to 12
+cars: the timing software sends it (`cars_set`), or cars are added as they
+are first seen (`await_car`, `lap`, `car_name`). Once 12 cars are listed,
+another number is refused (`lap` replies `"unknown"`) until a new list is
+sent or the list is flushed. The list and names are kept on the Pi.
 
 | Command | Parameters | Effect |
 |---|---|---|
-| `await_car` (**open**) | `car` (1..12), `track` (optional) | Follow this car from its next crossing. **Learning:** the lap in progress is dropped (it never becomes a lap), the head goes to where it looked at the line (mean of the marks so far) and waits; the next `lap` of this car starts a new lap. **Tracking** (armed, running or done, or `track` given): re-arms on the track (back to the start point); GO now only comes from this car. With auto adjust, the car's `expected` lap time becomes the target lap. Otherwise the car is only selected. Reply: `state` = `"learning"`, `"tracking"` or `"selected"`. |
-| `lap` (**open**) | `car` (optional: the car followed) | This car crosses the line. If it is the car followed (or no car is followed): a lap mark while learning, a GO while tracking. Lap time kept for every car. A repeat of the same car within 2 s is ignored. Reply: `car`, `action` = `"mark"`, `"go"`, `"none"` (another car, or nothing running) or `"ignored"`. |
-| `car_name` | `car`, `name` (24 characters max, `""` to clear) | Name shown in the web UI (kept on the Pi) |
-| `cars_reset` | - | New race: forgets every car's lap times (names are kept) |
+| `await_car` (**open**) | `car` (1..999), `track` (optional) | Follow this car from its next crossing. **Learning:** the lap in progress is dropped (it never becomes a lap), the head goes to where it looked at the line (mean of the marks so far) and waits; the next `lap` of this car starts a new lap. **Tracking** (armed, running or done, or `track` given): re-arms on the track (back to the start point); GO now only comes from this car. With auto adjust, the car's `expected` lap time becomes the target lap. Otherwise the car is only selected. Turns `follow_leader` off. Reply: `state` = `"learning"`, `"tracking"` or `"selected"`. |
+| `lap` (**open**) | `car` (optional: the car followed), `position` (optional: its race position after this crossing) | This car crosses the line. If it is the car followed (or no car is followed): a lap mark while learning, a GO while tracking. Lap time kept for every car. A repeat of the same car within 2 s is ignored. Reply: `car`, `action` = `"mark"`, `"go"`, `"none"` (another car, or nothing running), `"ignored"` or `"unknown"` (list full); `switched`: true when this crossing made it the car followed (follow the leader). |
+| `follow_leader` (**open**) | `on` (bool, default true) | Follow the leading car, whatever its number (see below). Switching on goes to the leader at once (as `await_car`) if it is known and not followed yet. Reply: `follow_leader`, `leader`, `state` |
+| `cars_set` (**open**) | `cars`: list of car numbers, or `{"car": 44, "name": "Dupont"}` objects (12 at most) | New car list. Cars still in the list keep their lap times (and their name unless one is given); the others are forgotten. If the car followed is dropped, none is followed. Reply: `cars` (the numbers) |
+| `cars` (**open**) | - | Reply: `cars` (as in the status) |
+| `cars_flush` (**open**) | - | Forgets every car: list, names, lap times. None is followed. |
+| `car_name` (**open**) | `car`, `name` (24 characters max, `""` to clear) | Name shown in the web UI (kept on the Pi) |
+| `cars_reset` (**open**) | - | New race: forgets every car's lap times, crossing counts and positions (the list and names are kept) |
+
+**Follow the leader.** The leader is worked out at the line: the car with
+the most crossings since the last `cars_reset`, and between equals the one
+that crossed first. If the timing software sends `position` with its
+`lap` signals, positions are used instead (the latest report wins). A car
+that takes the lead does so by crossing the line first, so the head
+switches to it **at that crossing**: while learning, the lap in progress
+(the old leader's) is dropped and this crossing starts a new lap; while
+tracking, this crossing is the GO (the lap in progress is dropped and the
+head glides onto the new one). Send `cars_reset` at the start of the race
+so the counts start together. Choosing a car (`await_car`, or a click on
+a car) turns it off.
 
 Lap times: a crossing interval longer than 1.6 times the car's usual lap is
 not counted (laps were missed, for example the software only reports the
@@ -364,8 +386,19 @@ Timing software sequence, learning a track while following several cars:
 {"cmd": "record_stop"}
 ```
 
+Race following the leader, every car reported:
+
+```json
+{"cmd": "cars_set", "cars": [5, 12, {"car": 44, "name": "Dupont"}]}
+{"cmd": "track_arm", "name": "Circuit"}
+{"cmd": "cars_reset"}                       // start of the race
+{"cmd": "follow_leader", "on": true}
+{"cmd": "lap", "car": 12, "position": 1}    // every crossing of every car
+{"cmd": "lap", "car": 5, "position": 2}     // (position: optional)
+```
+
 Live tracking is the same: `track_arm` once, then `await_car` / `lap`.
-`await_car` and `lap` are open like `track_go`: they work while the web page
+The car commands are open like `track_go`: they work while the web page
 holds the lock. `record_start` / `record_stop` are control commands (not
 open).
 
@@ -462,7 +495,7 @@ When a program holds the lock:
 
 * only that token may send **control** commands;
 * everyone else, including web pages, UDP, REST and VISCA, can still send
-  the **open** commands: `stop`, `estop`, `track_go`, `lap`, `await_car`, `status`, `config`,
+  the **open** commands: `stop`, `estop`, `track_go`, the car commands of 5.6.1, `status`, `config`,
   `presets`, `recordings`, `diag`, `debug`, `lock` and `unlock`;
 * other web pages show a red "Locked by ..." banner, and their controls are
   disabled;
@@ -611,7 +644,7 @@ asyncio.run(main())
 | `level_set(pitch=None, roll=None)`, `level_enable(on)`, `level_mark()`, `level_clear()` | Base levelling (5.11) |
 | `shutdown(poweroff=True)` | Rest, motors off, power off (5.10) |
 | `track_arm(name, wait=True)`, `track_go()`, `wait_lap()`, `track_set(**settings)`, `track_abort()` | Race tracking |
-| `await_car(car, track=None)`, `lap(car=None)`, `car_name(car, name)`, `cars_reset()` | Several cars (5.6.1) |
+| `await_car(car, track=None)`, `lap(car=None, position=None)`, `follow_leader(on=True)`, `cars_set(cars)`, `cars()`, `cars_flush()`, `car_name(car, name)`, `cars_reset()` | Several cars (5.6.1) |
 | `play(name, speed, loop, wait)`, `play_stop()` | Replay |
 
 If the connection drops, pending calls fail with `ConnectionError`, and the

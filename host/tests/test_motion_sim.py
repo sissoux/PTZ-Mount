@@ -900,9 +900,87 @@ def test_several_cars_learning_and_tracking(tmp_path, monkeypatch):
         cars = {c["car"]: c for c in ctrl.status()["cars"]["list"]}
         assert cars[1]["laps"] == 2 and cars[1]["best_lap"] > 0.3 and cars[2]["laps"] >= 1
         assert (await dispatch(ctrl, {"cmd": "car_name", "car": 3, "name": "Dupont"}))["ok"]
-        assert json.loads((tmp_path / "settings.json").read_text())["car_names"] == {"3": "Dupont"}
-        assert not (await dispatch(ctrl, {"cmd": "await_car", "car": 13}))["ok"]
+        saved = json.loads((tmp_path / "settings.json").read_text())["cars"]
+        assert {"car": 3, "name": "Dupont"} in saved and [c["car"] for c in saved] == [1, 7, 2, 3]
+        assert not (await dispatch(ctrl, {"cmd": "await_car", "car": 0}))["ok"]
         await dispatch(ctrl, {"cmd": "cars_reset"})
         assert all(c["laps"] == 0 for c in ctrl.status()["cars"]["list"])
         await ctrl.track_abort()
+    run(t, tmp_path)
+
+
+def test_car_list_and_follow_leader(tmp_path, monkeypatch):
+    import ptz.track
+    monkeypatch.setattr(ptz.track, "MIN_LAP_S", 0.2)
+
+    async def lap_of(ctrl):
+        await ctrl.goto({"pan": 40, "tilt": 10}, wait=True)
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+
+    async def lap(ctrl, car, **kw):
+        r = await dispatch(ctrl, {"cmd": "lap", "car": car, **kw}, source="udp timing")
+        assert r["ok"], r
+        return r
+
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+        r = await dispatch(ctrl, {"cmd": "cars_set", "cars": [44, {"car": 7, "name": "Dupont"}, 3, 44]})
+        assert r["ok"] and r["cars"] == [44, 7, 3]
+        st = (await dispatch(ctrl, {"cmd": "cars"}))["cars"]
+        assert [c["car"] for c in st["list"]] == [44, 7, 3] and st["list"][1]["name"] == "Dupont"
+
+        # learning, following the leader: 7 leads, then 44 overtakes
+        await dispatch(ctrl, {"cmd": "record_start", "mode": "laps", "name": "Lead"})
+        r = await dispatch(ctrl, {"cmd": "follow_leader", "on": True})
+        assert r["ok"] and r["leader"] is None and ctrl.follow_leader
+        r = await lap(ctrl, 7)
+        assert r["action"] == "mark" and r.get("switched") and ctrl.current_car == 7
+        await asyncio.sleep(0.25)
+        assert (await lap(ctrl, 44))["action"] == "none"      # behind 7
+        await lap_of(ctrl)
+        assert (await lap(ctrl, 7))["action"] == "mark"
+        await asyncio.sleep(0.25)
+        assert (await lap(ctrl, 44))["action"] == "none"
+        await ctrl.goto({"pan": 20, "tilt": 5}, wait=True)   # part of 7's lap
+        r = await lap(ctrl, 44)                               # 44 crosses first: new leader
+        assert r["action"] == "mark" and r.get("switched") and ctrl.current_car == 44
+        assert ctrl.status()["cars"]["leader"] == 44 and len(ctrl.recorder.breaks) == 1
+        await ctrl.goto({"pan": 0, "tilt": 0}, wait=True)
+        await lap_of(ctrl)
+        assert (await lap(ctrl, 7))["action"] == "none"
+        assert (await lap(ctrl, 44))["action"] == "mark"
+        r = await dispatch(ctrl, {"cmd": "record_stop"})
+        assert r["ok"], r
+        assert len(r["recording"]["laps"]) == 2               # the overtaken lap is dropped
+
+        # tracking: new race, the first to cross leads; then positions from the software
+        assert (await dispatch(ctrl, {"cmd": "track_arm", "name": "Lead", "wait": True}))["ok"]
+        await dispatch(ctrl, {"cmd": "lock"}, client="operator")
+        assert (await dispatch(ctrl, {"cmd": "cars_reset"}, source="udp timing"))["ok"]
+        await asyncio.sleep(0.3)
+        r = await lap(ctrl, 3)
+        assert r["action"] == "go" and r.get("switched") and ctrl.current_car == 3
+        assert (await lap(ctrl, 7))["action"] == "none"
+        await asyncio.sleep(0.3)
+        r = await lap(ctrl, 44, position=1)
+        assert r["action"] == "go" and ctrl.current_car == 44
+        assert (await lap(ctrl, 3, position=2))["action"] == "none"
+        assert ctrl.status()["cars"]["leader"] == 44
+        # choosing a car by hand turns it off
+        r = await dispatch(ctrl, {"cmd": "await_car", "car": 7}, source="udp timing")
+        assert r["ok"] and not ctrl.follow_leader and ctrl.current_car == 7
+        await dispatch(ctrl, {"cmd": "unlock"}, client="operator")
+        await ctrl.track_abort()
+
+        # a full list refuses new cars; flush forgets everything
+        assert (await dispatch(ctrl, {"cmd": "cars_set", "cars": list(range(1, 13))}))["ok"]
+        assert ctrl.current_car == 7
+        assert (await lap(ctrl, 99))["action"] == "unknown"
+        assert not (await dispatch(ctrl, {"cmd": "await_car", "car": 99}))["ok"]
+        assert not (await dispatch(ctrl, {"cmd": "cars_set", "cars": list(range(1, 14))}))["ok"]
+        assert (await dispatch(ctrl, {"cmd": "cars_flush"}))["ok"]
+        st = ctrl.status()["cars"]
+        assert st["list"] == [] and st["current"] is None
+        assert json.loads((tmp_path / "settings.json").read_text())["cars"] == []
     run(t, tmp_path)

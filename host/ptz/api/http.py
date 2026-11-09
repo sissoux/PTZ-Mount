@@ -65,6 +65,7 @@ class HttpServer:
         self.app.add_routes([
             web.get("/", self._index),
             web.get("/settings", self._settings_page),
+            web.get("/live", self._index),
             web.get("/api/config/file", self._cfg_get),
             web.post("/api/config/validate", self._cfg_validate),
             web.post("/api/config/file", self._cfg_save),

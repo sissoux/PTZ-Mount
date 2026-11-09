@@ -582,32 +582,40 @@ function renderTrackSelect(selectName) {
 }
 
 // ------------------------------------------------------------ cars
-let carsBuilt = false;
+let carsKey = null;
+let lastCars = null;
 const lapTxt = (v) => (v == null ? "-" : `${v.toFixed(2)} s`);
 function buildCars(list) {
-  $("car-grid").innerHTML = list.map((c) => `<button class="car-btn" id="car-${c.car}" data-car="${c.car}"
-      title="Follow car ${c.car}: go to the line and wait for its next crossing"><b>${c.car}</b><small id="car-sub-${c.car}"></small></button>`).join("");
+  $("car-grid").innerHTML = list.length ? list.map((c) => `<button class="car-btn" id="car-${c.car}" data-car="${c.car}"
+      title="Follow car ${c.car}: go to the line and wait for its next crossing"><i class="pos" id="car-pos-${c.car}"></i><b>${c.car}</b><small id="car-sub-${c.car}"></small></button>`).join("")
+    : `<p class="muted car-empty">No car yet. The timing software sends the list (<code>cars_set</code>)
+       or its lap signals; or type a car number above.</p>`;
   $("car-grid").querySelectorAll("[data-car]").forEach((b) => {
     b.onclick = () => send({ cmd: "await_car", car: parseInt(b.dataset.car, 10), id: "car" });
   });
   const tb = $("car-table").querySelector("tbody");
   tb.innerHTML = list.map((c) => `<tr id="carrow-${c.car}"><td>${c.car}</td>
       <td><input id="car-name-${c.car}" type="text" maxlength="24" placeholder="name"></td>
+      <td class="num" id="car-rank-${c.car}"></td>
       <td class="num" id="car-laps-${c.car}"></td><td class="num" id="car-last-${c.car}"></td>
       <td class="num" id="car-best-${c.car}"></td><td class="num" id="car-seen-${c.car}"></td></tr>`).join("");
   for (const c of list) {
     $(`car-name-${c.car}`).onchange = (e) => send({ cmd: "car_name", car: c.car, name: e.target.value.trim(), id: "cn" });
   }
-  carsBuilt = true;
+  carsKey = list.map((c) => c.car).join(",");
 }
 function renderCars(cars) {
-  if (!carsBuilt) buildCars(cars.list);
+  lastCars = cars;
+  if (cars.list.map((c) => c.car).join(",") !== carsKey) buildCars(cars.list);
   for (const c of cars.list) {
     const b = $(`car-${c.car}`);
     const cur = cars.current === c.car;
     b.classList.toggle("current", cur);
     b.classList.toggle("waiting", cur && cars.waiting);
     $(`car-sub-${c.car}`).textContent = c.name || (c.last_lap ? c.last_lap.toFixed(1) : "");
+    $(`car-pos-${c.car}`).textContent = c.position ? `P${c.position}` : "";
+    b.classList.toggle("leader", c.car === cars.leader);
+    $(`car-rank-${c.car}`).textContent = c.position ? `P${c.position}` : "";
     const n = $(`car-name-${c.car}`);
     if (document.activeElement !== n) n.value = c.name;
     $(`car-laps-${c.car}`).textContent = c.laps || "";
@@ -616,14 +624,42 @@ function renderCars(cars) {
     $(`car-seen-${c.car}`).textContent = c.since != null ? `${Math.round(c.since)} s ago` : "";
     $(`carrow-${c.car}`).classList.toggle("current", cur);
   }
-  const c = cars.current ? cars.list[cars.current - 1] : null;
-  $("car-status").textContent = !c ? "none: every lap signal counts"
-    : `#${c.car}${c.name ? " " + c.name : ""}` + (cars.waiting ? " - waiting at the line" : "");
+  const c = cars.list.find((x) => x.car === cars.current) || null;
+  const lead = cars.follow_leader ? "following the leader: " : "";
+  $("car-status").textContent = !c ? lead + (cars.follow_leader ? "the first car to cross" : "none: every lap signal counts")
+    : lead + `#${c.car}${c.name ? " " + c.name : ""}` + (cars.waiting ? " - waiting at the line" : "");
   $("car-status").classList.toggle("waiting", !!(c && cars.waiting));
+  $("btn-follow-first").classList.toggle("on", !!cars.follow_leader);
 }
 $("btn-cars-reset").onclick = () => {
-  if (confirm("Forget the lap times of every car (new race)?")) send({ cmd: "cars_reset", id: "cr" });
+  if (confirm("New race: forget the lap times and positions of every car?")) send({ cmd: "cars_reset", id: "cr" });
 };
+$("btn-cars-flush").onclick = () => {
+  if (confirm("Forget every car (numbers, names and lap times)?")) send({ cmd: "cars_flush", id: "cf" });
+};
+$("btn-follow-first").onclick = () => send({ cmd: "follow_leader", on: !(lastCars && lastCars.follow_leader), id: "fl" });
+function followTyped() {
+  const n = parseInt($("car-add").value, 10);
+  if (n >= 1 && n <= 999) { send({ cmd: "await_car", car: n, id: "car" }); $("car-add").value = ""; }
+}
+$("btn-car-add").onclick = followTyped;
+$("car-add").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); followTyped(); } };
+
+// ------------------------------------------------------------ live view
+function setLive(on) {
+  document.body.classList.toggle("live", on);
+  $("btn-live").textContent = on ? "▣ Full" : "▣ Live";
+  $("btn-live").title = on ? "Back to the full page" : "Live view: only jog, position, presets and race tracking (also at /live)";
+  try { localStorage.setItem("ptz-live", on ? "1" : "0"); } catch (e) { /* private mode */ }
+}
+$("btn-live").onclick = () => setLive(!document.body.classList.contains("live"));
+(() => {
+  let saved = null;
+  try { saved = localStorage.getItem("ptz-live"); } catch (e) { /* */ }
+  setLive(location.pathname.replace(/\/$/, "") === "/live" || saved === "1");
+})();
+$("btn-live-home").onclick = () => $("btn-home").click();
+$("btn-live-stop").onclick = () => $("btn-stop").click();
 
 function renderTracking(tr, rec) {
   const isLearning = rec.active && rec.mode === "laps";

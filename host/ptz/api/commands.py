@@ -58,7 +58,11 @@ Several cars (timing software; open to all, like track_go)
                                      (learning: drops the lap in progress; tracking: re-arm)
     {"cmd": "lap", "car": 5}         car 5 crosses the line: lap mark / GO if it is the car
                                      followed, lap time kept for every car
+    {"cmd": "lap", "car": 5, "position": 1}   same, with its race position (optional)
     {"cmd": "car_name", "car": 5, "name": "Dupont"}    {"cmd": "cars_reset"}
+    {"cmd": "cars_set", "cars": [5, 12, {"car": 44, "name": "Dupont"}]}   new car list
+    {"cmd": "cars_flush"}            forget every car     {"cmd": "cars"}  the list
+    {"cmd": "follow_leader", "on": true}   follow whoever leads (switches at the line)
 Blocking mode (web clients only)
     {"cmd": "lock"}   {"cmd": "unlock"}   {"cmd": "unlock", "force": true} (from the Pi)
     While locked, only the owner may send control commands; "stop", "estop"
@@ -86,7 +90,8 @@ _QUIET = {"jog", "status", "config", "presets", "recordings", "diag"}
 # allowed to everyone, even when another client holds the lock
 _OPEN = {"stop", "estop", "status", "config", "presets", "recordings", "diag",
          "debug", "lock", "unlock",
-         "track_go", "lap", "await_car"}   # the timing system may fire what the operator armed
+         "track_go", "lap", "await_car", "cars", "cars_set", "cars_flush", "cars_reset",
+         "car_name", "follow_leader"}   # the timing system may fire what the operator armed
 _last_jog_log = [0.0]
 
 
@@ -264,11 +269,19 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
         elif cmd == "await_car":
             reply["state"] = await ctrl.await_car(msg["car"], msg.get("track"))
         elif cmd == "lap":
-            reply.update(ctrl.car_lap(msg.get("car")))
+            reply.update(ctrl.car_lap(msg.get("car"), msg.get("position")))
         elif cmd == "car_name":
             ctrl.set_car_name(msg["car"], msg.get("name", ""))
         elif cmd == "cars_reset":
             ctrl.cars_reset()
+        elif cmd == "cars_set":
+            reply["cars"] = ctrl.cars_set(msg.get("cars"))
+        elif cmd == "cars_flush":
+            ctrl.cars_flush()
+        elif cmd == "cars":
+            reply["cars"] = ctrl.cars_status()
+        elif cmd == "follow_leader":
+            reply.update(await ctrl.set_follow_leader(msg.get("on", True)))
         # ------------------------------------------------ info / debug
         elif cmd == "status":
             reply["status"] = ctrl.status()

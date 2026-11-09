@@ -62,7 +62,8 @@ KP = 2.0                      # position feedback gain while streaming (1/s)
 FEEDBACK_LATENCY = 0.004      # s, host receive time vs MCU position sample
 LOCAL_ADDRESSES = ("127.0.0.1", "::1", "localhost")
 SOURCE_TTL = 10.0             # s, how long a UDP/VISCA sender is listed as active
-CARS = 12                     # cars that can be followed (numbered 1..CARS)
+CARS = 12                     # cars in the list (the car followed is one of them)
+CAR_NUMBER_MAX = 999          # race numbers 1..999
 _UNSET = object()
 
 
@@ -94,12 +95,15 @@ class MotionController:
         self.level_pitch = 0.0
         self.level_roll = 0.0
         self.level_marks: List[Tuple[float, float]] = []    # (pan, tilt) aimed level
-        # multi-car race: the car followed, and lap times of every car seen
-        self.cars: Dict[int, dict] = {n: {"name": "", "laps": 0, "last_lap": None,
-                                          "best_lap": None, "expected": None}
-                                      for n in range(1, CARS + 1)}
+        # multi-car race: the car list (in the timing software's order), the
+        # car followed, and the lap times of every car seen
+        self.cars: Dict[int, dict] = {}
         self.current_car: Optional[int] = None
+        self.follow_leader = False                  # follow whoever leads the race
         self._car_cross: Dict[int, float] = {}      # car -> last line crossing (loop time)
+        self._car_pos: Dict[int, int] = {}          # car -> race position sent with its lap
+        self._car_seq: Dict[int, int] = {}          # car -> order of its last crossing
+        self._seq = 0
         self.lock_owner: Optional[str] = None
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
@@ -362,9 +366,13 @@ class MotionController:
         for k in ("smoothing", "play_speed"):
             if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
-        for n, name in (data.get("car_names") or {}).items():
-            if str(n).isdigit() and int(n) in self.cars and isinstance(name, str):
-                self.cars[int(n)]["name"] = name[:24]
+        for n, name in (data.get("car_names") or {}).items():     # before v0.10
+            if str(n).isdigit() and isinstance(name, str) and len(self.cars) < CARS:
+                self.cars[int(n)] = self._new_car(name[:24])
+        for c in data.get("cars") or []:
+            if (isinstance(c, dict) and isinstance(c.get("car"), int)
+                    and 1 <= c["car"] <= CAR_NUMBER_MAX and len(self.cars) < CARS):
+                self.cars[c["car"]] = self._new_car(str(c.get("name") or "")[:24])
         lev = data.get("level") or {}
         self.level_on = bool(lev.get("enabled", False))
         for k in ("pitch", "roll"):
@@ -380,7 +388,7 @@ class MotionController:
                 "accel_axis": self.accel_axis, "smoothing": self.smoothing,
                 "play_speed": self.play_speed, "axis_active": self.axis_active,
                 "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits},
-                "car_names": {str(n): c["name"] for n, c in self.cars.items() if c["name"]},
+                "cars": [{"car": n, "name": c["name"]} for n, c in self.cars.items()],
                 "level": {"enabled": self.level_on, "pitch": self.level_pitch,
                           "roll": self.level_roll, "marks": self.level_marks}}
         try:
@@ -1481,14 +1489,98 @@ class MotionController:
         log.info("auto adjust: %s", tr["adjust_note"])
 
     # ================================================================ cars
-    def _car(self, car) -> int:
+    @staticmethod
+    def _new_car(name: str = "") -> dict:
+        return {"name": name, "laps": 0, "last_lap": None, "best_lap": None,
+                "expected": None, "crossings": 0}
+
+    @staticmethod
+    def _car_number(car) -> int:
         try:
             n = int(car)
         except (TypeError, ValueError):
-            raise MotionError(f"car must be a number 1..{CARS}") from None
-        if not 1 <= n <= CARS:
-            raise MotionError(f"car must be 1..{CARS}")
+            raise MotionError(f"car must be a number 1..{CAR_NUMBER_MAX}") from None
+        if n != car and str(n) != str(car).strip():
+            raise MotionError(f"car must be a number 1..{CAR_NUMBER_MAX}")
+        if not 1 <= n <= CAR_NUMBER_MAX:
+            raise MotionError(f"car must be 1..{CAR_NUMBER_MAX}")
         return n
+
+    def _car(self, car) -> int:
+        """Car number, added to the list the first time it is seen."""
+        n = self._car_number(car)
+        if n not in self.cars:
+            if len(self.cars) >= CARS:
+                raise MotionError(f"car {n} is not in the list (full: {CARS} cars; "
+                                  "send a new list or flush it)")
+            self.cars[n] = self._new_car()
+            log.info("car %d added to the list", n)
+            self._save_settings()
+        return n
+
+    def cars_set(self, cars) -> List[int]:
+        """New car list from the timing software: numbers, or {"car", "name"}.
+        Cars still in the list keep their lap times; the others are dropped."""
+        if not isinstance(cars, list):
+            raise MotionError("cars must be a list")
+        new: Dict[int, dict] = {}
+        for item in cars:
+            num, name = (item.get("car"), item.get("name")) if isinstance(item, dict) else (item, None)
+            n = self._car_number(num)
+            if n in new:
+                continue
+            c = self.cars.get(n) or self._new_car()
+            if name is not None:
+                c["name"] = str(name).strip()[:24]
+            new[n] = c
+        if len(new) > CARS:
+            raise MotionError(f"at most {CARS} cars")
+        self.cars = new
+        for d in (self._car_cross, self._car_pos, self._car_seq):
+            for n in [n for n in d if n not in new]:
+                del d[n]
+        if self.current_car not in new:
+            self.current_car = None
+        self._save_settings()
+        log.info("car list: %s", ", ".join(map(str, new)) or "empty")
+        return list(new)
+
+    def cars_flush(self) -> None:
+        """Forget every car (numbers, names, lap times)."""
+        self.cars.clear()
+        self._car_cross.clear()
+        self._car_pos.clear()
+        self._car_seq.clear()
+        self.current_car = None
+        self._save_settings()
+        log.info("car list flushed")
+
+    def standings(self) -> List[int]:
+        """Cars seen at the line, leader first. With positions sent by the
+        timing software: by position (the latest report wins a tie). Else:
+        the most crossings since the reset, then the earliest to cross."""
+        seen = [n for n in self.cars if n in self._car_seq]
+        if self._car_pos:
+            key = lambda n: (self._car_pos.get(n, 10 ** 6), -self._car_seq[n])   # noqa: E731
+        else:
+            key = lambda n: (-self.cars[n]["crossings"], self._car_seq[n])      # noqa: E731
+        return sorted(seen, key=key)
+
+    def leader(self) -> Optional[int]:
+        s = self.standings()
+        return s[0] if s else None
+
+    async def set_follow_leader(self, on: bool) -> dict:
+        """Follow the leading car, whatever its number: when another car takes
+        the lead (seen when it crosses the line first), the head switches to
+        it at that crossing."""
+        self.follow_leader = bool(on)
+        lead = self.leader()
+        state = None
+        if self.follow_leader and lead is not None and lead != self.current_car:
+            state = await self.await_car(lead, _from_leader=True)
+        log.info("follow the leader: %s", "on" if self.follow_leader else "off")
+        return {"follow_leader": self.follow_leader, "leader": lead, "state": state}
 
     def _car_label(self, n: Optional[int]) -> str:
         if n is None:
@@ -1500,13 +1592,17 @@ class MotionController:
         self._save_settings()
 
     def cars_reset(self) -> None:
-        """New race: forget every lap time (names are kept)."""
+        """New race: forget every lap time and crossing count (the list and
+        names are kept)."""
         for c in self.cars.values():
-            c.update(laps=0, last_lap=None, best_lap=None, expected=None)
+            c.update(laps=0, last_lap=None, best_lap=None, expected=None, crossings=0)
         self._car_cross.clear()
+        self._car_pos.clear()
+        self._car_seq.clear()
         log.info("car lap times cleared")
 
-    async def await_car(self, car, track: Optional[str] = None) -> str:
+    async def await_car(self, car, track: Optional[str] = None,
+                        _from_leader: bool = False) -> str:
         """Follow another car: the head goes to the start line and waits for
         that car's next crossing (a "lap" event with its number).
 
@@ -1514,9 +1610,12 @@ class MotionController:
         where it looked at the line, and the next crossing starts a new lap.
         Tracking (armed or running, or `track` given): re-arm on the track;
         GO now only comes from this car. Otherwise the car is just selected.
+        Choosing a car turns "follow the leader" off.
         Returns "learning", "tracking" or "selected"."""
         c = self._car(car)
         self.current_car = c
+        if not _from_leader:
+            self.follow_leader = False
         rec, tr = self.recorder, self.tracking
         if rec.active and rec.mode == "laps":
             rec.lap_break()
@@ -1537,13 +1636,27 @@ class MotionController:
         log.info("now following %s", self._car_label(c))
         return "selected"
 
-    def car_lap(self, car=None) -> dict:
+    def car_lap(self, car=None, position=None) -> dict:
         """A car crosses the start / finish line (timing software).
 
         Every car's lap time is kept. The car followed (see await_car; any
         car while none is selected) also drives the head: a lap mark while
-        learning, a GO while tracking."""
-        c = self.current_car if car is None else self._car(car)
+        learning, a GO while tracking. position: its race position, if the
+        timing software knows it (else the leader comes from the crossings).
+        Following the leader: a car that crosses the line as the new leader
+        becomes the car followed at once (it is on the line right now)."""
+        if position is not None:
+            try:
+                position = int(position)
+                assert position >= 1
+            except (TypeError, ValueError, AssertionError):
+                raise MotionError("position must be 1 or more") from None
+        try:
+            c = self.current_car if car is None else self._car(car)
+        except MotionError:
+            if car is not None and len(self.cars) >= CARS:
+                return {"car": car, "action": "unknown"}     # list full: not tracked
+            raise
         now = asyncio.get_running_loop().time()
         interval = None
         if c is not None:
@@ -1551,7 +1664,12 @@ class MotionController:
             if prev is not None and now - prev < _track.MIN_LAP_S:
                 return {"car": c, "action": "ignored"}       # repeated signal
             self._car_cross[c] = now
+            self._seq += 1
+            self._car_seq[c] = self._seq
+            if position is not None:
+                self._car_pos[c] = position
             info = self.cars[c]
+            info["crossings"] += 1
             if prev is not None:
                 lap = now - prev
                 ref = info["expected"] or info["last_lap"]
@@ -1569,19 +1687,29 @@ class MotionController:
                         info["expected"] = round(lap, 3)
                     elif abs(lap / exp - 1.0) <= tol:
                         info["expected"] = round((exp + lap) / 2.0, 3)
+        switched = False
+        if (self.follow_leader and c is not None and c != self.current_car
+                and self.leader() == c):
+            log.info("%s takes the lead: following it", self._car_label(c))
+            self.current_car, switched = c, True
         if self.current_car is not None and c != self.current_car:
             return {"car": c, "action": "none"}
         action = "none"
         rec = self.recorder
         if rec.active and rec.mode == "laps":
+            if switched:
+                rec.lap_break()          # the old leader's lap in progress is dropped
             self.lap_mark()
             action = "mark"
         elif self.tracking["phase"] != "idle" and self._track_task is not None:
+            exp = self.cars[c]["expected"] if c is not None else None
+            if switched and self.tracking["auto_adjust"] and exp:
+                self.tracking["target_lap"] = exp
             self.track_go(interval)
             if c is not None and self.tracking["auto_adjust"] and self.tracking["target_lap"]:
                 self.cars[c]["expected"] = self.tracking["target_lap"]
             action = "go"
-        return {"car": c, "action": action}
+        return {"car": c, "action": action, **({"switched": True} if switched else {})}
 
     def cars_status(self) -> dict:
         try:
@@ -1591,8 +1719,10 @@ class MotionController:
         waiting = bool((self.recorder.active and self.recorder.mode == "laps"
                         and self.recorder.waiting)
                        or self.tracking["phase"] in ("arming", "armed"))
-        return {"current": self.current_car, "waiting": waiting,
-                "list": [{"car": n, **c,
+        rank = {n: i + 1 for i, n in enumerate(self.standings())}
+        return {"current": self.current_car, "waiting": waiting, "max": CARS,
+                "follow_leader": self.follow_leader, "leader": next(iter(rank), None),
+                "list": [{"car": n, **c, "position": rank.get(n),
                           "since": (round(now - self._car_cross[n], 1)
                                     if now is not None and n in self._car_cross else None)}
                          for n, c in self.cars.items()]}

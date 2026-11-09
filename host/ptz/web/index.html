@@ -20,6 +20,7 @@
     </div>
     <button id="btn-lock" class="small lock" title="Blocking mode: only you can move the head">🔒 Take control</button>
     <a class="btn small" href="/settings" title="Edit the configuration file">⚙ Config</a>
+    <button id="btn-live" class="small" title="Live view: only jog, position, presets and race tracking (also at /live)">▣ Live</button>
     <button id="btn-shutdown" class="small" title="Rest the head, turn the motors off and shut the Pi down">⏻ Shutdown</button>
     <label class="debug-toggle"><input id="debug-mode" type="checkbox"> Debug</label>
     <button id="btn-estop" class="estop">E-STOP</button>
@@ -44,6 +45,10 @@
     <div class="col col-left">
       <section class="card control">
         <div id="readout" class="readout"></div>
+        <div class="row live-only">
+          <button id="btn-live-home">Home all</button>
+          <button id="btn-live-stop">Stop</button>
+        </div>
         <div id="pad" class="pad"><div id="knob" class="knob"></div></div>
         <div class="zoom">
           <label>Zoom</label>
@@ -166,18 +171,28 @@
       <section class="card race">
         <h2>Race tracking</h2>
         <h3>Car followed <span id="car-status" class="car-status"></span></h3>
+        <div class="row car-tools">
+          <button id="btn-follow-first" title="Follow the leading car, whatever its number. When another car takes the lead (it crosses the line first), the head switches to it at that crossing.">🏁 Follow first</button>
+          <input id="car-add" type="number" min="1" max="999" placeholder="car #" class="short">
+          <button id="btn-car-add" class="small" title="Follow this car number (added to the list)">Follow</button>
+        </div>
         <div id="car-grid" class="car-grid"></div>
         <details class="car-more">
           <summary>Names &amp; lap times</summary>
           <table id="car-table" class="car-table"><thead>
-            <tr><th>Car</th><th>Name</th><th>Laps</th><th>Last</th><th>Best</th><th>Seen</th></tr>
+            <tr><th>Car</th><th>Name</th><th>Pos</th><th>Laps</th><th>Last</th><th>Best</th><th>Seen</th></tr>
           </thead><tbody></tbody></table>
-          <button id="btn-cars-reset" class="small ghost" title="New race: forget every lap time (names are kept)">Reset lap times</button>
+          <div class="row">
+            <button id="btn-cars-reset" class="small ghost" title="New race: forget every lap time and position (the list and names are kept)">Reset lap times</button>
+            <button id="btn-cars-flush" class="small ghost" title="Forget every car: numbers, names and lap times">Flush car list</button>
+          </div>
         </details>
         <p class="hint">Click a car to follow it: the head goes to the line and waits for
           that car's next crossing (learning: the lap in progress is dropped; tracking: re-armed).
-          From the timing software: <code>{"cmd":"await_car","car":5}</code> and, at each
-          crossing, <code>{"cmd":"lap","car":5}</code> (UDP port 9000 or HTTP POST /api/cmd).</p>
+          From the timing software: <code>{"cmd":"cars_set","cars":[5,12,44]}</code>,
+          <code>{"cmd":"await_car","car":5}</code> and, at each crossing,
+          <code>{"cmd":"lap","car":5}</code> (UDP port 9000 or HTTP POST /api/cmd).
+          Cars are added to the list as they are seen (12 at most).</p>
 
         <h3>1 · Learn the lap</h3>
         <div class="row">
@@ -203,10 +218,10 @@
           <select id="track-select"></select>
           <label>Target lap <input id="target-lap" type="number" min="1" step="0.1" placeholder="learned" class="short"> s</label>
         </div>
-        <div class="row">
+        <div class="row race-settings">
           <label><input id="auto-rearm" type="checkbox" checked> Auto re-arm after each lap</label>
         </div>
-        <div class="row">
+        <div class="row race-settings">
           <label title="After each GO, the next lap time moves halfway to the measured GO-to-GO time">
             <input id="auto-adjust" type="checkbox"> Auto adjust lap time</label>
           <label title="Measured laps further than this from the current lap time are ignored (crash, slow lap, another car)">

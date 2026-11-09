@@ -39,7 +39,7 @@ class RecorderError(Exception):
 
 
 def _safe_name(name: str) -> str:
-    name = re.sub(r"[^A-Za-z0-9 _.()-]", "_", name).strip(" .")
+    name = re.sub(r"[^A-Za-z0-9 _.()~-]", "_", name).strip(" .")
     return name[:60] or time.strftime("rec-%Y%m%d-%H%M%S")
 
 
@@ -201,6 +201,36 @@ class Recorder:
     def import_data(self, data, limits: Dict[str, tuple], name: str = "") -> dict:
         """Validate and store an uploaded recording. `limits` maps every
         configured axis to (min, max). Never overwrites an existing one."""
+        out = self._validated(data, limits)
+        out["name"] = name or data.get("name") or "uploaded"
+        return self._save(out, overwrite=False)
+
+    def save_edited(self, name: str, data, limits: Dict[str, tuple]) -> dict:
+        """Store a path from the editor under `name`, replacing it. The
+        previous version is kept in recordings/backups/. Names starting with
+        '~' are scratch files (preview), hidden from the list."""
+        out = self._validated(data, limits)
+        out["name"] = name
+        if out["mode"] == "track":                 # replay speed follows the edit
+            out["lap_time"] = out["points"][-1]["t"]
+            for k in ("laps", "source"):
+                if k in data:
+                    out[k] = data[k]
+        path = self._path(name)
+        if os.path.exists(path) and not _safe_name(name).startswith("~"):
+            bdir = os.path.join(self.dir, "backups")
+            os.makedirs(bdir, exist_ok=True)
+            stem = _safe_name(name)
+            dst_name = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+            with open(path, encoding="utf-8") as src, open(
+                    os.path.join(bdir, dst_name), "w", encoding="utf-8") as dst:
+                dst.write(src.read())
+            old = sorted(f for f in os.listdir(bdir) if f.startswith(stem + "-"))
+            for f in old[:-10]:                     # keep the last 10 per recording
+                os.remove(os.path.join(bdir, f))
+        return self._save(out, overwrite=True)
+
+    def _validated(self, data, limits: Dict[str, tuple]) -> dict:
         if not isinstance(data, dict) or not isinstance(data.get("points"), list):
             raise RecorderError("not a recording: expected an object with a 'points' list")
         pts = data["points"]
@@ -236,14 +266,14 @@ class Recorder:
         mode = data.get("mode", "continuous")
         if mode not in ("continuous", "keypoints", "track", "laps-raw"):
             mode = "continuous"
-        out = {"name": name or data.get("name") or "uploaded", "mode": mode, "points": clean}
+        out = {"mode": mode, "points": clean}
         if mode == "track" and isinstance(data.get("lap_time"), (int, float)):
             out["lap_time"] = float(data["lap_time"])
         if mode == "laps-raw" and isinstance(data.get("markers"), list):
             t0 = float(pts[0]["t"])
             out["markers"] = [float(m) - t0 for m in data["markers"]
                               if isinstance(m, (int, float))]
-        return self._save(out, overwrite=False)
+        return out
 
     def _add(self, now: Optional[float] = None) -> None:
         now = self._clock() if now is None else now
@@ -301,7 +331,7 @@ class Recorder:
         out = []
         if os.path.isdir(self.dir):
             for fn in os.listdir(self.dir):
-                if fn.endswith(".json"):
+                if fn.endswith(".json") and not fn.startswith("~"):
                     try:
                         with open(os.path.join(self.dir, fn), encoding="utf-8") as f:
                             out.append(self._summary(json.load(f)))

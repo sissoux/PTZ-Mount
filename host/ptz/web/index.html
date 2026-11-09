@@ -83,6 +83,14 @@
       </section>
 
 
+      <section class="card limits-card">
+        <h2>Soft limits</h2>
+        <label class="lim-on"><input id="limits-on" type="checkbox"> Enabled: the head cannot go past these limits</label>
+        <table id="limits-table"><tbody></tbody></table>
+        <p class="hint">Jog the head to a boundary, then press Set. When enabled, every motion
+          (jog, presets, replays, tracking, scripts) stops at the limits.</p>
+      </section>
+
       <section class="card pad-card">
         <h2>Controller (gamepad / joystick)</h2>
         <div id="gp-warning" class="result-bad hidden"></div>
@@ -159,6 +167,7 @@
         <div id="track-speed" class="muted"></div>
         <div class="row">
           <button id="btn-arm">ARM</button>
+          <button id="btn-track-edit" title="Fine-tune this track in the path editor">✎ Edit</button>
           <button id="btn-go" class="go-btn" disabled title="Start the lap now. During a lap: drop it and start the next one">GO <small>(Enter)</small></button>
           <button id="btn-track-abort" disabled>Abort</button>
         </div>
@@ -225,6 +234,81 @@
     </section>
   </main>
 
+
+  <!-- ============================== path editor (overlay) ============================== -->
+  <div id="editor" class="editor hidden">
+    <div class="ed-bar">
+      <b id="ed-title">Path editor</b>
+      <span id="ed-info" class="muted"></span>
+      <span class="grow"></span>
+      <button id="ed-undo" class="small" title="Ctrl+Z">↶ Undo</button>
+      <button id="ed-redo" class="small" title="Ctrl+Y">↷ Redo</button>
+      <select id="ed-prev-speed" title="Preview speed"><option value="0.25">×0.25</option><option value="0.5" selected>×0.5</option><option value="1">×1</option></select>
+      <button id="ed-preview" class="small">▶ Preview on head</button>
+      <button id="ed-prev-stop" class="small">■ Stop</button>
+      <button id="ed-save" class="small rec-btn">Save</button>
+      <button id="ed-saveas" class="small">Save as…</button>
+      <button id="ed-close" class="small">✕ Close</button>
+    </div>
+    <div class="ed-body">
+      <div class="ed-views">
+        <div class="ed-map-wrap">
+          <canvas id="ed-map"></canvas>
+          <div class="ed-overlay-btns"><button id="ed-fit" class="small">Fit</button></div>
+          <div class="ed-legend muted">Aim map: pan → / tilt ↑. Grey = recording, red frame = soft limits, + = head, ○ = playhead. Drag points; wheel = zoom; drag background = move view.</div>
+        </div>
+        <div class="ed-tl-wrap">
+          <canvas id="ed-tl"></canvas>
+          <div class="ed-legend muted">Drag a point = value, Shift+drag = timing. Click = playhead. Double-click = add point. Wheel = zoom time. Red dashed = soft limits, white dotted = head.</div>
+        </div>
+      </div>
+      <div class="ed-side">
+        <section class="card">
+          <h2>Point <span id="ed-pt-index"></span></h2>
+          <div id="ed-point" class="ed-point"></div>
+          <div class="row">
+            <button id="ed-goto" class="small" title="Move the head to this point">Go to on head</button>
+            <button id="ed-from-head" class="small" title="Store the head position in this point">Set from head</button>
+          </div>
+          <div class="row">
+            <button id="ed-insert" class="small">+ Insert after</button>
+            <button id="ed-delete" class="small">Delete</button>
+            <button id="ed-prev-pt" class="small">◀</button>
+            <button id="ed-next-pt" class="small">▶</button>
+          </div>
+          <label class="ed-live"><input id="ed-live" type="checkbox" checked> Live: the head follows the selected point</label>
+        </section>
+        <section class="card">
+          <h2>Head</h2>
+          <div id="ed-head" class="ed-head"></div>
+          <div class="row"><button id="ed-goto-play" class="small">Go to playhead</button>
+            <span id="ed-play-t" class="muted"></span></div>
+        </section>
+        <section class="card">
+          <h2>Whole path</h2>
+          <div id="ed-offsets" class="ed-offsets"></div>
+          <div class="row"><button id="ed-offset-apply" class="small">Apply offset</button></div>
+          <div class="row">
+            <label>Duration <input id="ed-duration" type="number" min="0.5" step="0.1" class="short"> s</label>
+            <button id="ed-duration-apply" class="small">Apply</button>
+          </div>
+          <div class="row">
+            <button id="ed-trim-start" class="small">Trim start at playhead</button>
+            <button id="ed-trim-end" class="small">Trim end at playhead</button>
+          </div>
+          <div class="row">
+            <label>Simplify <input id="ed-tol" type="number" min="0.02" max="5" step="0.05" value="0.3" class="short"></label>
+            <button id="ed-resimplify" class="small">Rebuild points</button>
+          </div>
+          <div id="ed-dev" class="muted"></div>
+          <div class="row" id="ed-zoom-add-row"><button id="ed-zoom-add" class="small">+ Add zoom to this path</button></div>
+          <label class="ed-live" id="ed-ghost-row"><input id="ed-ghosts" type="checkbox" checked> Show the learned laps</label>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
+  <script src="/static/editor.js"></script>
 </body>
 </html>

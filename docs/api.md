@@ -158,6 +158,9 @@ abridged:
               "effective_speed": {"pan": 30.0, "tilt": 30.0, "zoom": 5.0},
               "effective_accel": {...}, "smoothing": 0.3, "ease_s": 0.18,
               "play_speed": 1.0, "play_loop": false},
+ "limits": {"enabled": true,
+            "axes": {"pan": {"min": -35.0, "max": 38.0}, "tilt": {"min": null, "max": 10.0}, ...},
+            "effective": {"pan": [-35.0, 38.0], "tilt": [-30.0, 10.0], "zoom": [0.0, 250.0]}},
  "lock": null, "sources": [], "playback": null, "recording": {"active": false},
  "tracking": {"phase": "idle", "track": null, "lap_time": null, "runs": 0, ...}}
 ```
@@ -178,6 +181,7 @@ abridged:
 | `axes.<n>.at_limit` | The axis is held at, or braking toward, a soft limit |
 | `axes.<n>.active` | The axis is in use (see `axis_active`) |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
+| `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
 | `lock` | `null`, or `{"owner": <token>, "label": "<ip> (<client>)"}` |
 | `sources` | UDP / VISCA senders seen in the last 10 s |
 | `playback` | `null`, or `{"name", "phase": "positioning"/"playing", "progress": 0..1, "loop", "pass", "duration"}` |
@@ -337,6 +341,30 @@ next GO (`phase` `"armed"`).
 | `debug` (open), `on` | Verbose logging on the Pi |
 | `logs` (WebSocket only), `on` | Subscribes to `log_backlog` and `log` messages |
 
+### 5.9 Soft limits
+
+Learned limits narrow the travel set in the configuration, for example to
+keep the camera off a wall or a pit building. When enabled, every motion
+stops at them: jog, goto, presets, replays, tracking, from any source. A
+replay or a tracked lap that goes past a limit brakes and runs along it. The
+board also receives them as a safety net. An axis that is outside its limits
+can only move back inside.
+
+| Command | Parameters | Effect |
+|---|---|---|
+| `limit_set` | `axis`, `side` (`"min"`/`"max"`), `value` (optional) | Sets one limit. Without `value`: the current head position (the axis must be homed). The reply has `value`. |
+| `limit_clear` | `axis` (optional), `side` (optional) | Removes one limit, both limits of an axis, or every limit |
+| `limits_enable` | `on` (bool) | Enforces the learned limits, or not. The limits stay stored either way. |
+
+On pan, `min` is left and `max` is right; on tilt, `min` is down and `max`
+is up. The limits and the on/off switch are stored on the Pi.
+
+```json
+{"cmd": "limit_set", "axis": "tilt", "side": "max", "id": 1}
+{"cmd": "limit_set", "axis": "pan", "side": "min", "value": -60, "id": 2}
+{"cmd": "limits_enable", "on": true, "id": 3}
+```
+
 ## 6. Blocking mode for live events
 
 When a program holds the lock:
@@ -417,6 +445,7 @@ s.sendto(json.dumps({"cmd": "track_go"}).encode(), ("PTZMount.local", 9000))
 | `GET /api/recordings` | | List of recording summaries |
 | `GET /api/recordings/{name}` | | Download a recording (JSON file) |
 | `POST /api/recordings?name=...` | Recording JSON | Upload a recording (validated; never overwrites) |
+| `PUT /api/recordings/{name}` | Recording JSON | Saves an edited recording (validated). **Replaces** an existing one; the previous version is kept in `~/.ptz/recordings/backups/` (last 10). For a track, the lap time becomes the time of the last point. Needs the lock when another client holds it. |
 | `POST /api/cmd` | A command object | The reply (status 200 if ok, 400 if refused) |
 | `GET /api/config/file` | | The configuration text and file information |
 | `POST /api/config/validate` | `{"text": ...}` | Checks a configuration |
@@ -487,6 +516,7 @@ asyncio.run(main())
 | `home(axes, wait=True)`, `goto(..., speed, wait)`, `move_rel(...)`, `preset(n, speed, wait)`, `save_preset(n, name)` | Motion |
 | `jog(**values)`, `JogStream(client, rate=25)` | Jog: one frame, or a continuous stream |
 | `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)` | |
+| `limit_set(axis, side, value=None)`, `limit_clear(axis=None, side=None)`, `limits_enable(on)` | Soft limits |
 | `track_arm(name, wait=True)`, `track_go()`, `wait_lap()`, `track_set(**settings)`, `track_abort()` | Race tracking |
 | `play(name, speed, loop, wait)`, `play_stop()` | Replay |
 

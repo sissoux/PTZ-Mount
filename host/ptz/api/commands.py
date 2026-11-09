@@ -14,6 +14,10 @@ Motion
     {"cmd": "home", "axes": ["pan", "tilt"]}  (omitted: axes with home_with_all)
     {"cmd": "enable", "on": true}
     {"cmd": "axis_active", "axis": "zoom", "on": true}   switch an axis on / off live
+Soft limits (learned)
+    {"cmd": "limit_set", "axis": "tilt", "side": "max"}   current position (or "value")
+    {"cmd": "limit_clear", "axis": "tilt", "side": "max"}  (both: omit side; all: omit axis)
+    {"cmd": "limits_enable", "on": true}
 Settings (axis units, stored on the Pi)
     {"cmd": "set_motion", "speed": 30, "accel": 50, "smoothing": 0.3}   all axes
     {"cmd": "set_motion", "advanced": true,
@@ -147,6 +151,13 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             await ctrl.enable(bool(msg.get("on", True)), msg.get("axes"))
         elif cmd == "axis_active":
             await ctrl.set_axis_active(msg["axis"], bool(msg.get("on", True)))
+        # ------------------------------------------------ learned soft limits
+        elif cmd == "limit_set":
+            reply["value"] = await ctrl.set_user_limit(msg["axis"], msg["side"], msg.get("value"))
+        elif cmd == "limit_clear":
+            await ctrl.clear_user_limit(msg.get("axis"), msg.get("side"))
+        elif cmd == "limits_enable":
+            await ctrl.enable_user_limits(bool(msg.get("on", True)))
         # ------------------------------------------------ settings
         elif cmd == "set_motion":
             ctrl.set_motion(speed=msg.get("speed"), accel=msg.get("accel"),

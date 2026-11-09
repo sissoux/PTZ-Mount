@@ -76,6 +76,7 @@ function fmtPos(v, u) {
 // ------------------------------------------------------------ config-driven UI
 function onConfig() {
   buildAxesTable();
+  buildLimitsTable();
   buildReadout();
   buildAxisSliders();
   const vmax = Math.max(...config.axes.map((a) => a.max_velocity));
@@ -131,6 +132,47 @@ function buildAxisSliders() {
   }
 }
 
+// ------------------------------------------------------------ soft limits
+const LIMIT_LABELS = { pan: ["◀ Left", "Right ▶"], tilt: ["▼ Bottom", "Top ▲"] };
+function buildLimitsTable() {
+  const tb = $("limits-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const a of config.axes) {
+    const [lo, hi] = LIMIT_LABELS[a.name] || ["Min", "Max"];
+    const tr = document.createElement("tr");
+    tr.id = `limrow-${a.name}`;
+    tr.innerHTML = `<td>${a.name}</td>`
+      + [["min", lo], ["max", hi]].map(([side, label]) => `<td class="lim-cell">
+          <span class="muted">${label}</span> <b class="num" id="lim-${a.name}-${side}">-</b>
+          <button class="small" data-set="${side}" title="Use the current head position">Set</button>
+          <button class="small ghost" data-clear="${side}" title="Remove this limit">✕</button></td>`).join("");
+    tr.querySelectorAll("[data-set]").forEach((b) => {
+      b.onclick = () => send({ cmd: "limit_set", axis: a.name, side: b.dataset.set, id: "ls" });
+    });
+    tr.querySelectorAll("[data-clear]").forEach((b) => {
+      b.onclick = () => send({ cmd: "limit_clear", axis: a.name, side: b.dataset.clear, id: "lc" });
+    });
+    tb.appendChild(tr);
+  }
+}
+function renderLimits(lim, axes) {
+  if (document.activeElement !== $("limits-on")) $("limits-on").checked = lim.enabled;
+  for (const a of config.axes) {
+    const u = lim.axes[a.name] || {};
+    for (const side of ["min", "max"]) {
+      const el = $(`lim-${a.name}-${side}`);
+      if (el) el.textContent = u[side] == null ? "none" : fmtPos(u[side], a.units);
+    }
+    const row = $(`limrow-${a.name}`);
+    if (row) row.classList.toggle("inactive", axes[a.name] && axes[a.name].active === false);
+  }
+}
+$("limits-on").onchange = () => send({ cmd: "limits_enable", on: $("limits-on").checked, id: "le" });
+$("btn-track-edit").onclick = () => {
+  const name = $("track-select").value;
+  if (name) openEditor(name); else showError("learn a track first");
+};
+
 // ------------------------------------------------------------ axis on / off
 function setAxisActive(name, on) {
   send({ cmd: "axis_active", axis: name, on, id: "act" });
@@ -182,6 +224,7 @@ function renderStatus(s) {
     }
   }
   if (config && s.settings) renderSettings(s.settings);
+  if (config && s.limits) renderLimits(s.limits, s.axes);
   renderLock(s.lock);
   renderClients();
   renderRecorder(s.recording || {}, s.playback);
@@ -349,10 +392,12 @@ function renderRecordings() {
       <td class="actions">
         <button class="small" data-a="play" title="Replay">▶</button>
         <a class="small btn" href="/api/recordings/${encodeURIComponent(r.name)}" download title="Download (JSON)">⬇</a>
-        <button class="small" data-a="rename" title="Rename">✎</button>
+        <button class="small" data-a="edit" title="Open in the path editor">✎</button>
+        <button class="small" data-a="rename" title="Rename">🏷</button>
         <button class="small" data-a="delete" title="Delete">🗑</button></td>`;
     tr.querySelector('[data-a="play"]').onclick = () =>
       send({ cmd: "play", name: r.name, speed: playSpeed(), loop: $("play-loop").checked, id: "pl" });
+    tr.querySelector('[data-a="edit"]').onclick = () => openEditor(r.name);
     tr.querySelector('[data-a="rename"]').onclick = () => {
       const n = prompt("New name", r.name);
       if (n && n !== r.name) send({ cmd: "recording_rename", name: r.name, new: n, id: "rn" });

@@ -80,6 +80,10 @@ class MotionController:
         # Blocking mode: only the lock owner (a web client id) may move the head
         # axes in use (an absent zoom drive can be switched off live)
         self.axis_active = {a.name: a.active for a in self.axes}
+        # learned soft limits (inside the configured travel), on/off from the UI
+        self.user_limits: Dict[str, Dict[str, Optional[float]]] = {
+            a.name: {"min": None, "max": None} for a in self.axes}
+        self.user_limits_on = False
         self.lock_owner: Optional[str] = None
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
@@ -329,6 +333,13 @@ class MotionController:
         for n, v in (data.get("axis_active") or {}).items():
             if n in self.axis_active and isinstance(v, bool):
                 self.axis_active[n] = v
+        lim = data.get("user_limits") or {}
+        self.user_limits_on = bool(lim.get("enabled", False))
+        for n, d in (lim.get("axes") or {}).items():
+            if n in self.user_limits and isinstance(d, dict):
+                for side in ("min", "max"):
+                    if isinstance(d.get(side), (int, float)):
+                        self.user_limits[n][side] = float(d[side])
         for k in ("smoothing", "play_speed"):
             if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
@@ -337,7 +348,8 @@ class MotionController:
         data = {"advanced": self.advanced, "speed_all": self.speed_all,
                 "accel_all": self.accel_all, "speed_axis": self.speed_axis,
                 "accel_axis": self.accel_axis, "smoothing": self.smoothing,
-                "play_speed": self.play_speed, "axis_active": self.axis_active}
+                "play_speed": self.play_speed, "axis_active": self.axis_active,
+                "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits}}
         try:
             os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
             with open(self._settings_path, "w", encoding="utf-8") as f:
@@ -400,6 +412,75 @@ class MotionController:
             "play_speed": self.play_speed,
             "play_loop": self.play_loop,
         }
+
+    # ================================================================ soft limits
+    def limits_of(self, name: str) -> Tuple[float, float]:
+        """Travel allowed now: configured limits, narrowed by the learned
+        soft limits when they are enabled."""
+        ax = self.cfg.axes[name]
+        lo, hi = ax.position_min, ax.position_max
+        if self.user_limits_on:
+            u = self.user_limits[name]
+            if u["min"] is not None:
+                lo = max(lo, u["min"])
+            if u["max"] is not None:
+                hi = min(hi, u["max"])
+        return lo, hi
+
+    async def _apply_limits(self, names: Optional[Iterable[str]] = None) -> None:
+        """Send the limits in force to the MCU (it enforces them for every
+        kind of motion, as the last line of defence)."""
+        if not self.ready:
+            return
+        for name in (names or [a.name for a in self.axes]):
+            ax = self.cfg.axes[name]
+            if not self.state[name].homed or name in self._homing:
+                continue
+            lo, hi = self.limits_of(name)
+            await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
+                                    max=ax.to_steps(hi), enabled=1)
+
+    async def set_user_limit(self, name: str, side: str, value: Optional[float] = None) -> float:
+        """Learn one soft limit; value defaults to the current position."""
+        ax = self.axis(name)
+        if side not in ("min", "max"):
+            raise MotionError("side must be 'min' or 'max'")
+        if value is None:
+            if not self.state[name].homed:
+                raise MotionError(f"axis '{name}' is not homed")
+            value = self.position(name)
+        value = clamp(float(value), ax.position_min, ax.position_max)
+        other = self.user_limits[name]["max" if side == "min" else "min"]
+        if other is not None and ((side == "min" and value >= other)
+                                  or (side == "max" and value <= other)):
+            raise MotionError(f"{name} {side} limit {value:.2f} must be "
+                              f"{'below' if side == 'min' else 'above'} the {('max' if side == 'min' else 'min')} limit {other:.2f}")
+        self.user_limits[name][side] = round(value, 3)
+        self._save_settings()
+        await self._apply_limits([name])
+        log.info("soft limit %s %s = %.2f", name, side, value)
+        return value
+
+    async def clear_user_limit(self, name: Optional[str] = None, side: Optional[str] = None) -> None:
+        names = [name] if name else list(self.user_limits)
+        for n in names:
+            self.axis(n)
+            for sd in ([side] if side else ["min", "max"]):
+                self.user_limits[n][sd] = None
+        self._save_settings()
+        await self._apply_limits(names)
+        log.info("soft limits cleared: %s", ", ".join(names))
+
+    async def enable_user_limits(self, on: bool) -> None:
+        self.user_limits_on = bool(on)
+        self._save_settings()
+        await self._apply_limits()
+        log.info("soft limits %s", "ENABLED" if on else "disabled")
+
+    def limits_status(self) -> dict:
+        return {"enabled": self.user_limits_on,
+                "axes": {n: dict(v) for n, v in self.user_limits.items()},
+                "effective": {n: list(self.limits_of(n)) for n in self.user_limits}}
 
     # ================================================================ axis on / off
     async def set_axis_active(self, name: str, on: bool) -> None:
@@ -554,7 +635,8 @@ class MotionController:
         if traj is not None:
             traj.advance(dt)
             samples = traj.sample()
-            self._des_hist.append((now, {n: p for n, (p, _) in samples.items()}))
+            self._des_hist.append((now, {n: clamp(p, *self.limits_of(n))
+                                         for n, (p, _) in samples.items()}))
             ref = None
             if now - self._last_status < 0.1:
                 ref = self._desired_at(self._last_status - FEEDBACK_LATENCY)
@@ -564,6 +646,11 @@ class MotionController:
                     corr = KP * (ref[name] - self.position(name))
                     v += clamp(corr, -0.1 * ax.max_velocity, 0.1 * ax.max_velocity)
                 v = clamp(v, -ax.max_velocity, ax.max_velocity)
+                if self.state[name].homed:          # never through the limits
+                    lo, hi = self.limits_of(name)
+                    pos = self.position(name)
+                    v = clamp(v, -braking_speed(pos - lo, ax.max_accel, 0.0),
+                              braking_speed(hi - pos, ax.max_accel, 0.0))
                 self._cmd_vel[name] = v
                 mask |= 1 << ax.index
                 vels[ax.index] = v * ax.steps_per_unit
@@ -587,8 +674,9 @@ class MotionController:
             st.braking = False
             if st.homed:                              # ease into the soft limits
                 pos = self.position(name)
-                up = braking_speed(ax.position_max - pos, amax, smooth)
-                dn = braking_speed(pos - ax.position_min, amax, smooth)
+                lo, hi = self.limits_of(name)
+                up = braking_speed(hi - pos, amax, smooth)
+                dn = braking_speed(pos - lo, amax, smooth)
                 if target > up or target < -dn:
                     target = clamp(target, -dn, up)
                     st.braking = True
@@ -629,6 +717,7 @@ class MotionController:
                 spu = ax.steps_per_unit
                 # landing on an end-of-travel switch halts the axis: that is "done" too
                 waits.append(self._expect(ax.index, P.EV_MOVE_DONE, P.EV_ENDSTOP_HIT))
+                target = clamp(target, *self.limits_of(name))
                 await self.link.request("MOVE_TO", axis=ax.index, target=ax.to_steps(target),
                                         max_vel=ax.max_velocity * spu * 0.5,
                                         accel=ax.max_accel * spu)
@@ -706,7 +795,7 @@ class MotionController:
                 raise MotionError(f"axis '{name}' is not homed")
             if name in self._homing:
                 raise MotionError(f"axis '{name}' is homing")
-            final[name] = max(ax.position_min, min(ax.position_max, float(target)))
+            final[name] = clamp(float(target), *self.limits_of(name))
             start[name] = self.position(name)
             vmax[name] = self.speed_of(name) * k
             amax[name] = self.accel_of(name)
@@ -840,17 +929,18 @@ class MotionController:
                 await self._home_retract(ax, trig, d, retract, travel)
                 await self._home_approach(ax, d * ax.second_homing_speed * spu, retract * 3)
                 await self._set_position(ax, ax.position_endstop)
-            await self.link.request("SET_LIMITS", axis=ax.index,
-                                    min=ax.to_steps(ax.position_min),
-                                    max=ax.to_steps(ax.position_max), enabled=1)
+            lo, hi = self.limits_of(ax.name)
+            await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
+                                    max=ax.to_steps(hi), enabled=1)
             st.homed = True
             log.info("%s homed", ax.name)
         finally:
             self._homing.discard(ax.name)
         target = ax.park_position
-        if target is None and not ax.position_min <= ax.position_endstop <= ax.position_max:
-            target = min(max(ax.position_endstop, ax.position_min), ax.position_max)
-        return target
+        lo, hi = self.limits_of(ax.name)
+        if target is None and not lo <= ax.position_endstop <= hi:
+            target = ax.position_endstop
+        return None if target is None else clamp(target, lo, hi)
 
     async def _set_position(self, ax: AxisConfig, units: float) -> None:
         steps = ax.to_steps(units)
@@ -909,6 +999,14 @@ class MotionController:
         self.recorder.start(mode, name, on_move)
         log.info("recording %s (%s)", "armed: starts on first movement" if on_move
                  else "started", mode)
+
+    def save_edited_recording(self, name: str, data) -> dict:
+        limits = {a.name: (a.position_min, a.position_max) for a in self.axes}
+        summary = self.recorder.save_edited(name, data, limits)
+        if not name.startswith("~"):
+            log.info("recording '%s' saved from the editor: %d points, %.1f s",
+                     summary["name"], summary["points"], summary["duration"])
+        return summary
 
     def import_recording(self, data, name: str = "") -> dict:
         limits = {a.name: (a.position_min, a.position_max) for a in self.axes}
@@ -1180,6 +1278,7 @@ class MotionController:
             "motion": self._traj_kind,
             "playback": playback,
             "recording": self.recorder.state(),
+            "limits": self.limits_status(),
             "tracking": {**self.tracking, "speed_eff": round(self._track_speed(), 3),
                          "current_lap": (round(self.current_lap_time(), 3)
                                          if self.current_lap_time() else None),

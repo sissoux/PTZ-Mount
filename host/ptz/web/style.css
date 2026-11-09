@@ -192,3 +192,32 @@ h2 { margin-bottom: 10px; }
   main.layout { grid-template-columns: 1fr; }
   .col-right { display: flex; }
 }
+
+/* ---- v0.6: soft limits panel ---- */
+.lim-on { display: block; margin-bottom: 8px; }
+#limits-table td { padding: 4px; white-space: nowrap; font-size: 13px; }
+#limits-table td:first-child { width: 44px; color: var(--muted); }
+.lim-cell .num { display: inline-block; min-width: 64px; }
+#limits-table tr.inactive td { opacity: .4; }
+
+/* ---- v0.6: path editor overlay ---- */
+body.editing { overflow: hidden; }
+.editor { position: fixed; left: 0; right: 0; bottom: 0; top: 57px; z-index: 10; background: var(--bg);
+          display: grid; grid-template-rows: auto 1fr; border-top: 1px solid var(--line); }
+.ed-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.ed-bar .grow { flex: 1; }
+.ed-bar select { padding: 4px 6px; }
+.ed-body { display: grid; grid-template-columns: 1fr 380px; gap: 14px; padding: 14px; min-height: 0; }
+.ed-views { display: grid; grid-template-rows: 46fr 54fr; gap: 14px; min-height: 0; }
+.ed-map-wrap, .ed-tl-wrap { position: relative; background: var(--card); border: 1px solid var(--line);
+                            border-radius: 10px; min-height: 0; overflow: hidden; }
+.ed-map-wrap canvas, .ed-tl-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+.ed-legend { position: absolute; left: 10px; bottom: 6px; font-size: 11px; pointer-events: none; }
+.ed-overlay-btns { position: absolute; right: 8px; top: 8px; }
+.ed-side { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; min-height: 0; }
+.ed-point, .ed-offsets, .ed-head { display: grid; grid-template-columns: 52px 1fr; gap: 6px 8px; align-items: center; font-size: 13px; }
+.ed-point input, .ed-offsets input { width: 100%; }
+.ed-nudge { display: flex; gap: 4px; }
+.ed-nudge button { padding: 2px 7px; font-size: 11px; }
+.ed-live { display: block; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.ed-head .num { font-variant-numeric: tabular-nums; }

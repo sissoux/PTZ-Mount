@@ -628,3 +628,74 @@ def test_wait_option_replies_when_motion_is_finished(tmp_path):
         r = await task
         assert not r["ok"] and "interrupted" in r["error"]
     run(t, tmp_path)
+
+
+def test_learned_soft_limits(tmp_path):
+    async def t(ctrl):
+        await ctrl.home(["pan", "tilt"])
+        # learn: jog/move to the boundary, then "set"
+        await ctrl.goto({"tilt": 20}, wait=True)
+        await asyncio.sleep(0.05)
+        r = await dispatch(ctrl, {"cmd": "limit_set", "axis": "tilt", "side": "max"})
+        assert r["ok"] and r["value"] == pytest.approx(20, abs=0.1)
+        await ctrl.goto({"tilt": -10}, wait=True)
+        await asyncio.sleep(0.05)
+        await dispatch(ctrl, {"cmd": "limit_set", "axis": "tilt", "side": "min"})
+        bad = await dispatch(ctrl, {"cmd": "limit_set", "axis": "tilt", "side": "min", "value": 30})
+        assert not bad["ok"]                                    # min above max refused
+        # not enabled yet: free travel
+        await ctrl.goto({"tilt": 40}, wait=True)
+        assert ctrl.position("tilt") == pytest.approx(40, abs=0.1)
+        assert (await dispatch(ctrl, {"cmd": "limits_enable", "on": True}))["ok"]
+        assert ctrl.status()["limits"]["effective"]["tilt"] == pytest.approx([-10, 20], abs=0.1)
+        # outside when enabled: may only come back
+        await ctrl.goto({"tilt": 0}, wait=True)
+        await ctrl.goto({"tilt": 60}, wait=True)                # clamped
+        await asyncio.sleep(0.05)
+        assert ctrl.position("tilt") == pytest.approx(20, abs=0.1)
+        for _ in range(40):                                     # jog hard upwards
+            ctrl.jog({"tilt": 1.0})
+            await asyncio.sleep(0.03)
+        assert ctrl.position("tilt") <= 20.5
+        # a replay going beyond the limit is held inside
+        pts = [{"t": 0, "pos": {"tilt": 0.0}}, {"t": 0.6, "pos": {"tilt": 60.0}},
+               {"t": 1.2, "pos": {"tilt": 0.0}}]
+        ctrl.import_recording({"name": "over", "points": pts})
+        await ctrl.play("over")
+        peak = -99
+        while ctrl.playback is not None:
+            peak = max(peak, ctrl.position("tilt"))
+            await asyncio.sleep(0.02)
+        assert peak <= 20.6
+        # persisted; disabling gives the full travel back
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["user_limits"]["enabled"] and data["user_limits"]["axes"]["tilt"]["max"] == pytest.approx(20, abs=0.1)
+        await dispatch(ctrl, {"cmd": "limits_enable", "on": False})
+        await ctrl.goto({"tilt": 50}, wait=True)
+        assert ctrl.position("tilt") == pytest.approx(50, abs=0.1)
+        await dispatch(ctrl, {"cmd": "limit_clear", "axis": "tilt"})
+        assert ctrl.user_limits["tilt"] == {"min": None, "max": None}
+    run(t, tmp_path)
+
+
+def test_editor_save_replaces_with_backup_and_hides_scratch(tmp_path):
+    import os
+
+    async def t(ctrl):
+        pts = [{"t": 0, "pos": {"pan": 0.0, "tilt": 0.0}}, {"t": 2, "pos": {"pan": 10.0, "tilt": 5.0}}]
+        ctrl.import_recording({"name": "Spa", "mode": "track", "lap_time": 2.0, "points": pts})
+        edited = {"mode": "track", "laps": [{"lap": 1}], "source": "Spa (raw)",
+                  "points": [{"t": 0, "pos": {"pan": 1.0, "tilt": 0.0}},
+                             {"t": 3, "pos": {"pan": 12.0, "tilt": 4.0}}]}
+        s = ctrl.save_edited_recording("Spa", edited)
+        assert s["name"] == "Spa" and s["lap_time"] == 3 and s["source"] == "Spa (raw)"
+        assert ctrl.recorder.load("Spa")["points"][1]["pos"]["pan"] == 12.0
+        backups = os.listdir(tmp_path / "recordings" / "backups")
+        assert len(backups) == 1 and backups[0].startswith("Spa-")
+        ctrl.save_edited_recording("~preview", edited)
+        assert [r["name"] for r in ctrl.recorder.list()] == ["Spa"]      # scratch hidden
+        assert ctrl.recorder.load("~preview")["mode"] == "track"
+        with pytest.raises(Exception):                                    # same checks as upload
+            ctrl.save_edited_recording("Spa", {"points": [{"t": 0, "pos": {"pan": 999}},
+                                                          {"t": 1, "pos": {"pan": 0}}]})
+    run(t, tmp_path)

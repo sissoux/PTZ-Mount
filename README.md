@@ -141,6 +141,30 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   * Replay once or in a loop, at 0.1x to 4x, adjustable while playing.
   * Download a recording as JSON, or upload one. Uploads are validated
     against the axes and soft limits and never overwrite an existing name.
+* **Path editor** (✎ on a recording, or ✎ Edit next to ARM for a track):
+  fine-tune a path on site. The recording is reduced to a few control points
+  and the curve shown is exactly the one the head replays.
+  * *Aim map* (pan → / tilt ↑) with the soft limits, presets, the original
+    recording and, for a track, the learned laps in grey. *Timelines* for
+    pan, tilt and zoom, plus a speed lane that turns red where an axis would
+    exceed its maximum speed.
+  * Drag points on the map or the timelines (Shift+drag on a timeline moves
+    the timing), double-click a timeline to add a point, Delete removes one.
+  * The on-track workflow: select a point (the head goes there when *Live* is
+    on), correct the aim with the joystick, press **Set from head**. Nudge
+    buttons (±0.1 / ±1) for small corrections.
+  * Whole path: offset per axis, new duration (lap time), trim start / end
+    at the playhead, rebuild points with another simplification tolerance,
+    add zoom to a path recorded without it.
+  * Undo / redo (Ctrl+Z / Ctrl+Y), *Preview on head* at ×0.25 to ×1 without
+    saving, *Save* (the previous version goes to
+    `~/.ptz/recordings/backups/`) or *Save as*. Re-ARM a track to use the
+    saved version.
+* **Soft limits** (middle column): jog the head to a boundary and press Set
+  for left / right pan and bottom / top tilt (and zoom min / max if needed).
+  With *Enabled* ticked, nothing can drive the head past them: jog, presets,
+  replays, tracking and scripts all stop at the limits. Untick it to use the
+  whole travel again; the learned values are kept on the Pi.
 * **Connected devices**: the 👥 counter lists the web pages and the network
   controllers (UDP, VISCA) seen in the last 10 s.
 * **Blocking mode** (🔒 Take control): only your page can move the head. The

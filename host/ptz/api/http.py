@@ -79,6 +79,7 @@ class HttpServer:
             web.get("/api/recordings", self._recordings),
             web.get("/api/recordings/{name}", self._download),
             web.post("/api/recordings", self._upload),
+            web.put("/api/recordings/{name}", self._save_edited),
             web.static("/static", WEB_ROOT),
         ])
         self._runner = None
@@ -261,6 +262,23 @@ class HttpServer:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         recs = self.ctrl.recorder.list()
         await self.broadcast({"type": "recordings", "recordings": recs})
+        return web.json_response({"ok": True, "recording": summary})
+
+    async def _save_edited(self, request):
+        """Path editor: replace a recording (previous version backed up)."""
+        denied = self._denied(request)
+        if denied:
+            return denied
+        try:
+            data = await request.json()
+            summary = self.ctrl.save_edited_recording(request.match_info["name"], data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+        except RecorderError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        if not summary["name"].startswith("~"):
+            await self.broadcast({"type": "recordings",
+                                  "recordings": self.ctrl.recorder.list()})
         return web.json_response({"ok": True, "recording": summary})
 
     # ------------------------------------------------------------ WebSocket

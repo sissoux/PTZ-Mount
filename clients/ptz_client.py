@@ -275,6 +275,22 @@ class PTZClient:
     async def axis_active(self, axis: str, on: bool) -> dict:
         return await self.call("axis_active", axis=axis, on=on)
 
+    # soft limits
+    async def limit_set(self, axis: str, side: str, value: Optional[float] = None) -> float:
+        """side: "min" or "max". Without value: the current head position.
+        Returns the stored value."""
+        params = {"axis": axis, "side": side}
+        if value is not None:
+            params["value"] = value
+        return (await self.call("limit_set", **params))["value"]
+
+    async def limit_clear(self, axis: Optional[str] = None, side: Optional[str] = None) -> dict:
+        params = {k: v for k, v in (("axis", axis), ("side", side)) if v is not None}
+        return await self.call("limit_clear", **params)
+
+    async def limits_enable(self, on: bool) -> dict:
+        return await self.call("limits_enable", on=on)
+
     # race tracking
     async def track_arm(self, name: str, wait: bool = True, timeout: float = 120) -> dict:
         return await self.call("track_arm", timeout=timeout if wait else None,

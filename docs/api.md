@@ -198,7 +198,7 @@ abridged:
 | `mcu_warning` | Board firmware problem the operator must fix (e.g. `"... has no servo output: zoom unavailable. Reflash the SKR Pico ..."`), `""` otherwise. `firmware`: its protocol version. |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
 | `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
-| `lens` | Zoom lenses (5.12). `current`: the lens fitted (`null`: none). `sign`: +1 when the motor's positive direction zooms in, -1 when it zooms out. `focal`: current focal length in mm (`null` without a lens or before homing). `tilt_adjust`: finding the lens's max tilt (tilt soft limits off). `tilt_range`: the configured tilt travel. Per lens: focal range, the zoom positions of its `wide` and `tele` ends, its focal `points` ([zoom position, focal]) and its `tilt_max` (`null`: soft limits). |
+| `lens` | Zoom lenses (5.12). `current`: the lens fitted (`null`: none). `sign`: +1 when the motor's positive direction zooms in, -1 when it zooms out. `focal`: current focal length in mm (`null` without a lens or before homing). `tilt_adjust`: finding the lens's max tilt (tilt soft limits off). `locked`: servo zoom with no lens, the zoom does not move. `learning`: a lens is being learned (`lens_learn`). `tilt_range`: the configured tilt travel. Per lens: focal range, the zoom positions of its `wide` and `tele` ends, its focal `points` ([zoom position, focal]) and its `tilt_max` (`null`: soft limits). |
 | `level` | Base levelling (5.11). `world` is the current aim in the level frame (`null` until pan and tilt are homed). `spread` is the pan range covered by the marks. |
 | `shutdown` | `null`, or `{"phase", "message"}` once a shutdown is requested (5.10) |
 | `lock` | `null`, or `{"owner": <token>, "label": "<ip> (<client>)"}` |
@@ -527,7 +527,8 @@ tele, so that:
 | Command | Parameters | Effect |
 |---|---|---|
 | `lens_save` | `name`, `focal_min`, `focal_max` (mm), `at`, `points` (optional), `rename_from` (optional). Servo zoom: no `at`, `points` include the marks at `focal_min` and `focal_max` (the ends) | Learning. The zoom was homed (the ring at the endstop end) and moved to the other end of the ring (`move_rel`, the web wizard's steps, or jog). `at`: the end it is at now, `"tele"` (zoomed in) or `"wide"`. The other end is the endstop position. Stores the lens and selects it (same name: replaced). Instead of `at`, `wide` and `tele` positions can be given directly. `points`: focal marks `[[zoom position, focal], ...]` taken on the way (the focal printed on the barrel), strictly between the ends and in order along the ring. A lens learned again keeps its max tilt; `rename_from`: the old name of a lens being renamed. Reply: `lens` |
-| `lens_select` | `name` (`null` or `""`: none) | The lens fitted. Without a lens: motor direction and the configured travel. |
+| `lens_select` | `name` (`null` or `""`: none) | The lens fitted. Without a lens: motor direction and the configured travel; **servo zoom: locked** (no motion, see below). Ends a lens learning. |
+| `lens_learn` | `on` (bool) | Servo zoom: learning a lens, the zoom is free over its configured travel with no lens selected. Lasts 60 s: send it again to renew (the web wizard does, every 20 s). Off, `lens_save` or `lens_select`: ends it (no lens: the zoom stops and is locked where it rests). Reply: `lens` |
 | `lens_delete` | `name` | Forgets a lens |
 | `lenses` | - | Reply: `lens` (as in the status) |
 | `zoom_focal` | `focal` (mm), `speed`, `wait` | Zooms to this focal length (lens selected). `goto` also takes `focal`, to move the zoom with other axes. |
@@ -538,13 +539,22 @@ Before learning, select no lens: a lens's range would stop the zoom at its
 ends. The configured travel of the zoom axis must cover the longest ring
 travel.
 
-**Servo zoom** (no endstop, no homing): move the zoom anywhere (`goto`,
-`move_rel`, jog) and mark each focal length printed on the barrel. The marks
-at `focal_min` and `focal_max` are the two ends of the zoom (`lens_save`
-without `at`, `wide`, `tele`):
+**Servo zoom with no lens: locked.** The servo forces its way to the
+position asked and could break a lens past its ring's end. With no lens
+selected (`lens.locked` true in the status) the MCU limits of the zoom are
+pinned where it rests, `goto` / `move_rel` / `zoom_focal` / `raw_move` of
+the zoom fail with "zoom locked: no lens selected...", zoom jogs (web,
+gamepad, UDP, VISCA) are ignored, and a preset or a move with other axes
+moves those axes only. `lens_learn` unlocks it while learning.
+
+**Servo zoom** (no endstop, no homing): start learning, move the zoom
+anywhere (`goto`, `move_rel`, jog) and mark each focal length printed on
+the barrel. The marks at `focal_min` and `focal_max` are the two ends of
+the zoom (`lens_save` without `at`, `wide`, `tele`):
 
 ```json
 {"cmd": "lens_select", "name": null}
+{"cmd": "lens_learn", "on": true}
 {"cmd": "goto", "zoom": 22, "wait": true}
 {"cmd": "goto", "zoom": 88, "wait": true}
 {"cmd": "lens_save", "name": "Kit 18-135", "focal_min": 18, "focal_max": 135,
@@ -715,7 +725,7 @@ asyncio.run(main())
 | `stop()`, `estop()`, `clear_estop()`, `set_motion(**settings)`, `axis_active(axis, on)`, `raw_move(axis, steps, speed, accel=None, wait=False)` | |
 | `limit_set(axis, side, value=None)`, `limit_clear(axis=None, side=None)`, `limits_enable(on)` | Soft limits |
 | `level_set(pitch=None, roll=None)`, `level_enable(on)`, `level_mark()`, `level_clear()` | Base levelling (5.11) |
-| `lens_save(name, focal_min, focal_max, at, points=None)`, `lens_select(name)`, `lens_delete(name)`, `lenses()`, `zoom_focal(focal, wait=False)`, `lens_tilt_adjust(on)`, `lens_tilt_max(value=None, clear=False)` | Zoom lenses (5.12) |
+| `lens_save(name, focal_min, focal_max, at, points=None)`, `lens_select(name)`, `lens_delete(name)`, `lenses()`, `zoom_focal(focal, wait=False)`, `lens_tilt_adjust(on)`, `lens_tilt_max(value=None, clear=False)`, `lens_learn(on=True)` | Zoom lenses (5.12) |
 | `shutdown(poweroff=True)` | Rest, motors off, power off (5.10) |
 | `track_arm(name, wait=True)`, `track_go()`, `wait_lap()`, `track_set(**settings)`, `track_abort()` | Race tracking |
 | `await_car(car, track=None)`, `lap(car=None, position=None)`, `follow_leader(on=True)`, `cars_set(cars)`, `cars()`, `cars_flush()`, `car_name(car, name)`, `cars_reset()` | Several cars (5.6.1) |

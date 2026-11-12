@@ -1,5 +1,6 @@
 """End-to-end tests: MotionController <-> binary protocol <-> simulated MCU."""
 import asyncio
+import time
 import json
 
 import pytest
@@ -1206,6 +1207,7 @@ def test_servo_zoom_absolute_no_homing(tmp_path):
         assert not ctrl.state["pan"].homed and not ctrl.state["tilt"].homed
         assert ctrl.jog({"pan": 1.0}) == ["pan"]            # the head still needs homing
         ctrl.jog({"pan": 0.0})
+        await ctrl.lens_learn(True)                         # no lens: learning unlocks
         await ctrl.goto({"zoom": 80}, wait=True)
         await asyncio.sleep(0.05)
         assert ctrl.position("zoom") == pytest.approx(80, abs=0.05)
@@ -1230,11 +1232,109 @@ def test_servo_zoom_absolute_no_homing(tmp_path):
     saved = json.loads((tmp_path / "settings.json").read_text())
     assert saved["servo_pos"]["zoom"] == pytest.approx(30, abs=0.05)
     assert saved["axis_units"]["zoom"] == "%"
+    assert saved["servo_range"]["zoom"] == [0, 100, 1000, 2000]
 
     async def t2(ctrl):                                     # after a restart: same place
         assert ctrl.state["zoom"].homed
         assert ctrl.position("zoom") == pytest.approx(30, abs=0.05)
     run(t2, tmp_path, SERVO_CFG)
+
+
+def test_servo_zoom_locked_without_lens(tmp_path):
+    async def t(ctrl):
+        z = ctrl.state["zoom"]
+        start = z.pos
+        assert ctrl.zoom_locked() and ctrl.lens_status()["locked"]
+        assert ctrl.limits_of("zoom") == (50, 50)           # pinned where it is
+        # no control moves it: goto, relative, VISCA-style fraction, raw steps, jog
+        with pytest.raises(MotionError, match="zoom locked"):
+            await ctrl.goto({"zoom": 80})
+        with pytest.raises(MotionError, match="zoom locked"):
+            await ctrl.move_relative({"zoom": 5})
+        with pytest.raises(MotionError, match="zoom locked"):
+            await ctrl.zoom_to_fraction(1.0)
+        with pytest.raises(MotionError, match="zoom locked"):
+            await ctrl.raw_move("zoom", 400, 4000)
+        with pytest.raises(MotionError, match="lens"):
+            await ctrl.zoom_to_focal(50)
+        ctrl.jog({"zoom": 1.0})
+        await asyncio.sleep(0.3)
+        ctrl.jog({"zoom": 0.0})
+        assert z.pos == start
+        # a preset still moves pan, never the zoom
+        await ctrl.home(["pan"])
+        ctrl.presets.set(1, {"pan": 5.0, "zoom": 90.0})
+        await ctrl.recall_preset(1, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.position("pan") == pytest.approx(5, abs=0.05) and z.pos == start
+        # learning: free over the travel; ends when not renewed -> pinned again
+        await ctrl.lens_learn(True)
+        assert not ctrl.zoom_locked() and ctrl.limits_of("zoom") == (0, 100)
+        await ctrl.goto({"zoom": 20}, wait=True)
+        ctrl._learn_until = time.monotonic()                # expired
+        await asyncio.sleep(0.6)                            # the supervisor relocks
+        assert ctrl.zoom_locked() and not ctrl.lens_status()["learning"]
+        here = ctrl.position("zoom")
+        assert here == pytest.approx(20, abs=0.05)
+        lo, hi = ctrl.limits_of("zoom")
+        assert lo == hi == pytest.approx(here)
+        with pytest.raises(MotionError, match="zoom locked"):
+            await ctrl.goto({"zoom": 60})
+        # learn a lens: saving it ends learning, the zoom stays within its ends
+        await ctrl.lens_learn(True)
+        await ctrl.lens_save("Kit", 18, 135, points=[[30, 18], [70, 135]])
+        assert not ctrl.lens_learning and not ctrl.zoom_locked()
+        assert ctrl.limits_of("zoom") == (30, 70)
+        await ctrl.goto({"zoom": 95}, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.position("zoom") == pytest.approx(70, abs=0.05)
+        with pytest.raises(MotionError, match="end of its range"):   # debug page too
+            await ctrl.raw_move("zoom", 400, 4000)
+        r = await ctrl.raw_move("zoom", -100000, 4000, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.position("zoom") == pytest.approx(30, abs=0.05)
+        # no lens again: locked where it rests
+        await ctrl.lens_select(None)
+        assert ctrl.zoom_locked()
+        with pytest.raises(MotionError, match="zoom locked"):
+            await ctrl.goto({"zoom": 40})
+    run(t, tmp_path, SERVO_CFG)
+
+
+def test_servo_pulse_range_change_keeps_positions(tmp_path):
+    # settings saved by v0.14.0 with 1000..2000 us (no servo_range); the config
+    # now says 500..2500 us: everything stays at the same pulse widths
+    (tmp_path / "settings.json").write_text(json.dumps({
+        "axis_units": {"pan": "\u00b0", "tilt": "\u00b0", "zoom": "%"},
+        "servo_pos": {"zoom": 50.7}, "speed_axis": {"zoom": 50.0},
+        "accel_axis": {"zoom": 200.0},
+        "user_limits": {"enabled": False, "axes": {"zoom": {"min": 10, "max": None}}},
+        "lenses": {"Kit": {"focal_min": 18, "focal_max": 135, "wide": 20, "tele": 80,
+                           "points": [[50, 50]]}}, "lens": "Kit"}))
+    (tmp_path / "presets.json").write_text(json.dumps(
+        {"1": {"name": "a", "positions": {"pan": 3.0, "zoom": 40.0}}}))
+    cfg = (SERVO_CFG.replace("minimum_pulse_width: 0.001", "minimum_pulse_width: 500")
+           .replace("maximum_pulse_width: 2000", "maximum_pulse_width: 2500"))
+
+    async def t(ctrl):
+        z = ctrl.cfg.axes["zoom"]
+        assert ctrl.status()["axes"]["zoom"]["pulse"] == pytest.approx(1507, abs=0.5)
+        assert ctrl.position("zoom") == pytest.approx(50.35, abs=0.01)
+        lens = ctrl.lenses["Kit"]
+        assert [z.pulse_us(lens["wide"]), z.pulse_us(lens["tele"])] == [1200, 1800]
+        assert z.pulse_us(lens["points"][0][0]) == 1500
+        assert ctrl.speed_axis["zoom"] == pytest.approx(25)
+        assert z.pulse_us(ctrl.user_limits["zoom"]["min"]) == 1100
+        assert z.pulse_us(ctrl.presets.get(1)["zoom"]) == 1400
+        assert ctrl.presets.get(1)["pan"] == 3.0
+    run(t, tmp_path, cfg)
+    saved = json.loads((tmp_path / "settings.json").read_text())
+    assert saved["servo_range"]["zoom"] == [0, 100, 500, 2500]
+
+    async def t2(ctrl):                                     # not converted twice
+        assert ctrl.status()["axes"]["zoom"]["pulse"] == pytest.approx(1507, abs=0.5)
+        assert ctrl.lenses["Kit"]["wide"] == pytest.approx(35)
+    run(t2, tmp_path, cfg)
 
 
 def test_servo_on_old_firmware(tmp_path):

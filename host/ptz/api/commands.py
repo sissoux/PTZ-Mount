@@ -38,6 +38,9 @@ Zoom lenses (the zoom drive turns the lens's zoom ring)
                                      "clear": true -> soft limits again)
     With a lens selected, a positive zoom jog always zooms in, whatever the
     direction of its ring, and the zoom stays between the ring's two ends.
+    Servo zoom with no lens selected: the zoom is locked (no motion at all).
+    {"cmd": "lens_learn", "on": true}   learning a lens: zoom free over its travel
+                                        for 60 s (send again to renew; off: lock)
 Shutdown
     {"cmd": "shutdown"}        rest position, motors off, files flushed, Pi powered off
     {"cmd": "shutdown", "poweroff": false}   same, but the Pi stays on (safe to unplug)
@@ -214,6 +217,9 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
         elif cmd == "lens_delete":
             await ctrl.lens_delete(msg.get("name"))
         elif cmd == "lenses":
+            reply["lens"] = ctrl.lens_status()
+        elif cmd == "lens_learn":
+            await ctrl.lens_learn(bool(msg.get("on", True)))
             reply["lens"] = ctrl.lens_status()
         elif cmd == "lens_tilt_adjust":
             await ctrl.lens_tilt_adjust(bool(msg.get("on", True)))

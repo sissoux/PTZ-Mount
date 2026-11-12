@@ -38,7 +38,7 @@ def test_load_default_config():
     # zoom: hobby servo on the SERVOS header (gpio29), no endstop / homing
     z = cfg.axes["zoom"]
     assert z.servo and z.step_pin.gpio == 29 and not z.has_endstop and z.tmc is None
-    assert not z.endstop_guard and (z.pulse_min, z.pulse_max) == (1000, 2000)
+    assert not z.endstop_guard and (z.pulse_min, z.pulse_max) == (500, 2500)   # 270 deg servo
     # zoom drive not always fitted: off by default; axes park at 0 after homing
     assert cfg.axes["zoom"].active is False and pan.active is True
     assert pan.park_position == 0 and cfg.axes["tilt"].park_position == 0

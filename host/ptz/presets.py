@@ -33,6 +33,17 @@ class PresetStore:
                                 "positions": {k: round(v, 4) for k, v in positions.items()}}
         self._save()
 
+    def map_axis(self, axis: str, fn) -> None:
+        """Convert one axis's stored positions (its units changed)."""
+        hit = False
+        for p in self._data.values():
+            pos = p.get("positions") or {}
+            if isinstance(pos.get(axis), (int, float)):
+                pos[axis] = round(fn(pos[axis]), 4)
+                hit = True
+        if hit:
+            self._save()
+
     def delete(self, pid) -> None:
         if self._data.pop(str(pid), None) is not None:
             self._save()

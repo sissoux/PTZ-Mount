@@ -124,7 +124,8 @@ function onServoAxis(a) {
   $("in-steps").value = s > 0 ? s : 100 * us;
   $("in-speed").value = v > 0 ? v : Math.min(200 * us, Math.round(vmax));
   $("dir-hint").textContent = `+ lengthens the pulse. A move stops at the end of the pulse range `
-    + `(${a.pulse_min}..${a.pulse_max} µs in the config): widen it there only if the servo allows it.`;
+    + `(${a.pulse_min}..${a.pulse_max} µs in the config) and, for the zoom, at the ends of the lens `
+    + `selected. With no lens the zoom is locked (Control page: choose the lens, or learn it).`;
   updateEq();
   render();
 }
@@ -158,6 +159,9 @@ function updateEq() {
 }
 
 function flag(text, cls) { return `<span class="flag ${cls || ""}">${text}</span>`; }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
 
 function render() {
   if (!status || !config) return;
@@ -186,6 +190,9 @@ function render() {
     a.servo ? (st.available === false ? flag("needs new firmware", "bad") : flag("servo", "on"))
       : st.homed ? flag("homed", "on") : flag("not homed"),
     st.raw ? flag("raw move", "on") : "",
+    a.servo && axis === "zoom" && status.lens && status.lens.locked ? flag("locked: no lens", "bad")
+      : a.servo && axis === "zoom" && status.lens && status.lens.current
+        ? flag(`lens ${escapeHtml(status.lens.current)}`, "on") : "",
     status.estop ? flag("E-STOP", "bad") : "",
     status.ready ? "" : flag("MCU not ready", "bad"),
   ].join("");

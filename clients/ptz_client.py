@@ -334,6 +334,10 @@ class PTZClient:
     async def zoom_focal(self, focal: float, wait: bool = False) -> dict:
         return await self.call("zoom_focal", focal=focal, wait=wait)
 
+    async def lens_learn(self, on: bool = True) -> dict:
+        """Servo zoom: unlock the zoom with no lens for 60 s (renew while learning)."""
+        return await self.call("lens_learn", on=on)
+
     async def lens_tilt_adjust(self, on: bool) -> dict:
         """Tilt free (soft limits off) to find the lens's max tilt."""
         return await self.call("lens_tilt_adjust", on=on)

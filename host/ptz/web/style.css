@@ -321,4 +321,5 @@ body.live .car-btn b { font-size: 22px; }
 .chip button { border: none; background: none; padding: 0 6px; }
 
 /* ---- v0.14: servo zoom ---- */
+.lens-info.locked { color: var(--warn); }
 .lw-slider { width: 100%; margin-top: 10px; }

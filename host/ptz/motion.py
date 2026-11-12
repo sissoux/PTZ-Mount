@@ -64,6 +64,11 @@ LOCAL_ADDRESSES = ("127.0.0.1", "::1", "localhost")
 SOURCE_TTL = 10.0             # s, how long a UDP/VISCA sender is listed as active
 CARS = 12                     # cars in the list (the car followed is one of them)
 CAR_NUMBER_MAX = 999          # race numbers 1..999
+LENS_LEARN_TTL = 60.0         # s, lens learning ends unless the wizard renews it
+ZOOM_LOCKED = ("zoom locked: no lens selected (the servo could force a lens's ring "
+               "past its end). Choose the lens fitted, or learn it")
+# pulse range of the servo zoom in settings saved by v0.14.0 (no servo_range)
+_V0140_SERVO_RANGE = [0.0, 100.0, 1000.0, 2000.0]
 _UNSET = object()
 
 
@@ -102,6 +107,12 @@ class MotionController:
         self.lenses: Dict[str, dict] = {}
         self.lens: Optional[str] = None             # lens fitted (None: raw motor)
         self.tilt_adjust = False                    # finding the lens's max tilt
+        # servo zoom with no lens: locked (no motion), except while a lens is
+        # being learned (renewed by the wizard, LENS_LEARN_TTL)
+        self._learn_until = 0.0
+        self._learning_was = False
+        self._zoom_lock_log = 0.0
+        self._range_converted = False
         # multi-car race: the car list (in the timing software's order), the
         # car followed, and the lap times of every car seen
         self.cars: Dict[int, dict] = {}
@@ -159,6 +170,8 @@ class MotionController:
         self._tasks: List[asyncio.Task] = []
         link.on_status = self._on_status
         link.on_event = self._on_event
+        if self._range_converted:            # servo pulse range changed: store the
+            self._save_settings()            # converted positions with the new range
 
     # ================================================================ lifecycle
     async def start(self) -> None:
@@ -195,6 +208,9 @@ class MotionController:
             self.connected = (now - self._last_status) < 1.0
             if self.ready:
                 self._servo_persist()
+                if self._learning_was and not self.lens_learning:
+                    log.warning("lens learning ended (not renewed): zoom locked")
+                    await self._safe(self._zoom_relock())
             await asyncio.sleep(0.25)
 
     async def _safe(self, coro):
@@ -392,6 +408,7 @@ class MotionController:
             data["user_limits"] = lim
             if "zoom" in changed:
                 data["lenses"], data["lens"] = {}, None
+        data = self._convert_servo_ranges(data, changed)
         for n, v in (data.get("servo_pos") or {}).items():
             if n in self.cfg.axes and self.cfg.axes[n].servo and n not in changed \
                     and isinstance(v, num):
@@ -446,6 +463,64 @@ class MotionController:
                             if isinstance(m, list) and len(m) == 2
                             and all(isinstance(x, num) for x in m)]
 
+    def _convert_servo_ranges(self, data: dict, changed: Set[str]) -> dict:
+        """A servo's position is a % of its pulse range: when the range
+        changed in the config, the saved positions (last position, lens ends
+        and marks, soft limits, presets) and speeds are converted so they
+        stay at the same pulse widths (same physical place)."""
+        ranges = data.get("servo_range") or {}
+        units = data.get("axis_units") or {}
+        out = None
+        for ax in self.axes:
+            if not ax.servo or ax.name in changed or units.get(ax.name) is None:
+                continue
+            old = ranges.get(ax.name, _V0140_SERVO_RANGE)
+            new = [ax.position_min, ax.position_max, ax.pulse_min, ax.pulse_max]
+            try:
+                p0, p1, w0, w1 = (float(x) for x in old)
+            except (TypeError, ValueError):
+                continue
+            if [p0, p1, w0, w1] == new or p1 == p0 or w1 == w0:
+                continue
+            us_old = (w1 - w0) / (p1 - p0)             # us per unit
+            us_new = (ax.pulse_max - ax.pulse_min) / (ax.position_max - ax.position_min)
+
+            def conv(p, p0=p0, w0=w0, us_old=us_old, us_new=us_new, ax=ax):
+                return round(ax.position_min + (w0 + (p - p0) * us_old - ax.pulse_min)
+                             / us_new, 3)
+            k = us_old / us_new
+            n = ax.name
+            log.warning("%s pulse range changed (%g..%g -> %g..%g us): saved %s positions "
+                        "converted to the same pulse widths", n, w0, w1,
+                        ax.pulse_min, ax.pulse_max, n)
+            out = out or json.loads(json.dumps(data))
+            num = (int, float)
+            sp = out.get("servo_pos") or {}
+            if isinstance(sp.get(n), num):
+                sp[n] = conv(sp[n])
+            for key in ("speed_axis", "accel_axis"):
+                d = out.get(key) or {}
+                if isinstance(d.get(n), num):
+                    d[n] = round(d[n] * k, 3)
+            u = ((out.get("user_limits") or {}).get("axes") or {}).get(n) or {}
+            for side in ("min", "max"):
+                if isinstance(u.get(side), num):
+                    u[side] = conv(u[side])
+            if n == "zoom":
+                for lens in (out.get("lenses") or {}).values():
+                    if not isinstance(lens, dict):
+                        continue
+                    for key in ("wide", "tele"):
+                        if isinstance(lens.get(key), num):
+                            lens[key] = conv(lens[key])
+                    for p in lens.get("points") or []:
+                        if isinstance(p, list) and p and isinstance(p[0], num):
+                            p[0] = conv(p[0])
+            self.presets.map_axis(n, conv)
+        if out is not None:
+            self._range_converted = True             # saved again after loading
+        return data if out is None else out
+
     def _save_settings(self) -> None:
         data = {"advanced": self.advanced, "speed_all": self.speed_all,
                 "accel_all": self.accel_all, "speed_axis": self.speed_axis,
@@ -457,7 +532,10 @@ class MotionController:
                 "level": {"enabled": self.level_on, "pitch": self.level_pitch,
                           "roll": self.level_roll, "marks": self.level_marks},
                 "axis_units": {a.name: a.units for a in self.axes},
-                "servo_pos": self._servo_pos}
+                "servo_pos": self._servo_pos,
+                "servo_range": {a.name: [a.position_min, a.position_max,
+                                         a.pulse_min, a.pulse_max]
+                                for a in self.axes if a.servo}}
         try:
             atomic_write_json(self._settings_path, data)
         except OSError as e:
@@ -538,6 +616,9 @@ class MotionController:
         if lens_tilt is not None:
             hi = min(hi, lens_tilt)
             lo = min(lo, hi)
+        if name == "zoom" and self.zoom_locked():
+            p = clamp(self.position(name), ax.position_min, ax.position_max)
+            return p, p                              # no lens: pinned where it is
         if name == "zoom" and self._lens() is not None:
             w, t = self.zoom_ends()                  # the ring's end stops
             lo, hi = max(lo, min(w, t)), min(hi, max(w, t))
@@ -638,6 +719,57 @@ class MotionController:
     # ================================================================ zoom lenses
     def _lens(self) -> Optional[dict]:
         return self.lenses.get(self.lens) if self.lens else None
+
+    @property
+    def lens_learning(self) -> bool:
+        return time.monotonic() < self._learn_until
+
+    def zoom_locked(self) -> bool:
+        """Servo zoom with no lens selected (and no lens being learned):
+        the zoom must not move (the servo would force a ring past its end)."""
+        ax = self.cfg.axes.get("zoom")
+        return bool(ax is not None and ax.servo and self._lens() is None
+                    and not self.lens_learning)
+
+    def _zoom_lock_note(self) -> None:
+        now = time.monotonic()
+        if now - self._zoom_lock_log > 5.0:
+            self._zoom_lock_log = now
+            log.warning(ZOOM_LOCKED)
+
+    async def lens_learn(self, on: bool) -> None:
+        """Learning a lens (servo zoom): the zoom may move over its whole
+        travel with no lens selected. Ends after LENS_LEARN_TTL s unless
+        renewed (the wizard renews it while open), on lens_save / select, or
+        with on = False."""
+        ax = self.axis("zoom")
+        if on:
+            first = not self.lens_learning
+            self._learn_until = time.monotonic() + LENS_LEARN_TTL
+            self._learning_was = True
+            if first:
+                log.info("lens learning: zoom free over its travel%s",
+                         f" ({ax.pulse_min:g}..{ax.pulse_max:g} us)" if ax.servo else "")
+                await self._apply_limits(["zoom"])
+        elif self._learning_was or self.lens_learning:
+            self._learn_until = 0.0
+            log.info("lens learning ended")
+            await self._zoom_relock()
+
+    async def _zoom_relock(self) -> None:
+        """Learning over: stop the zoom, then pin its limits where it rests
+        (no lens) or set the lens's ends."""
+        self._learning_was = False
+        if "zoom" not in self.state or not self.ready:
+            return
+        if self.zoom_locked():
+            self._cancel_raw(["zoom"])
+            await self.stop(["zoom"])
+            for _ in range(40):                      # until it rests (servo: quick)
+                if not self.state["zoom"].flags & P.ST_MOVING:
+                    break
+                await asyncio.sleep(0.025)
+        await self._apply_limits(["zoom"])
 
     def zoom_ends(self) -> Tuple[float, float]:
         """Zoom axis positions of the wide and tele ends (no lens: the
@@ -791,7 +923,10 @@ class MotionController:
             raise MotionError(f"unknown lens '{name}'")
         self.lens = name or None
         self.tilt_adjust = False
+        self._learn_until = 0.0
         self._save_settings()
+        if self._learning_was or self.zoom_locked():
+            await self._zoom_relock()
         await self._apply_limits([n for n in ("zoom", "tilt") if n in self.state])
         log.info("lens: %s", self.lens or "none")
 
@@ -852,6 +987,7 @@ class MotionController:
         return {"current": self.lens, "sign": self.zoom_sign(),
                 "focal": round(f, 1) if f is not None else None,
                 "tilt_adjust": self.tilt_adjust,
+                "locked": self.zoom_locked(), "learning": self.lens_learning,
                 "tilt_range": [tilt.position_min, tilt.position_max] if tilt else None,
                 "list": [dict(v, name=k) for k, v in sorted(self.lenses.items())]}
 
@@ -973,6 +1109,10 @@ class MotionController:
         now = asyncio.get_running_loop().time()
         if "zoom" in values and self.zoom_sign() < 0:    # +: zoom in (tele), any lens
             values = {**values, "zoom": -float(values["zoom"])}
+        if "zoom" in values and self.zoom_locked():
+            if values["zoom"]:
+                self._zoom_lock_note()
+            values = {n: v for n, v in values.items() if n != "zoom"}
         shaped = {n: self._shape(v) for n, v in values.items()
                   if n in self.state and n not in self._homing and n not in self._raw
                   and self.axis_active.get(n)}
@@ -1269,6 +1409,12 @@ class MotionController:
         targets = {n: v for n, v in targets.items() if n not in skipped}
         if skipped and not targets:
             raise MotionError(f"{', '.join(skipped)} is disabled")
+        if "zoom" in targets and self.zoom_locked():
+            # a preset still moves pan / tilt, never the zoom
+            targets = {n: v for n, v in targets.items() if n != "zoom"}
+            if not targets:
+                raise MotionError(ZOOM_LOCKED)
+            self._zoom_lock_note()
         for name, target in targets.items():
             ax = self.axis(name)
             if not self.state[name].homed:
@@ -1332,13 +1478,17 @@ class MotionController:
         start = prev["target"] if prev is not None else st.pos
         target = start + steps
         if ax.servo:
-            # never outside the configured pulse range (the servo would force)
-            lo, hi = sorted((ax.to_steps(ax.position_min), ax.to_steps(ax.position_max)))
+            # never outside the limits in force: the lens's ring ends and the
+            # pulse range (the servo would force), no motion with no lens
+            if name == "zoom" and self.zoom_locked():
+                raise MotionError(ZOOM_LOCKED)
+            lo, hi = sorted(ax.to_steps(x) for x in self.limits_of(name))
             target = int(clamp(target, lo, hi))
             if target == st.pos:
-                raise MotionError(f"{name} is at the end of its pulse range "
-                                  f"({ax.pulse_min:g}..{ax.pulse_max:g} us)")
-            await self.link.request("SET_LIMITS", axis=ax.index, min=lo, max=hi, enabled=1)
+                lens = f", lens {self.lens}" if name == "zoom" and self.lens else ""
+                raise MotionError(f"{name} is at the end of its range "
+                                  f"({ax.pulse_us(ax.to_units(lo)):g}.."
+                                  f"{ax.pulse_us(ax.to_units(hi)):g} us{lens})")
         else:
             if st.homed:
                 log.info("%s: raw move, homing lost (home it again before use)", name)
@@ -1635,9 +1785,11 @@ class MotionController:
     async def _servo_init(self, ax: AxisConfig) -> None:
         """A servo is absolute (its own position loop): no homing. The MCU
         position is set before the output is enabled."""
-        await self._set_position(ax, self._servo_start(ax))
+        start = self._servo_start(ax)
+        await self._set_position(ax, start)
         self.state[ax.name].homed = True
-        lo, hi = self.limits_of(ax.name)
+        lo, hi = ((start, start) if ax.name == "zoom" and self.zoom_locked()
+                  else self.limits_of(ax.name))
         await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
                                 max=ax.to_steps(hi), enabled=1)
 

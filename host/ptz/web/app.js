@@ -654,7 +654,7 @@ $("car-add").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e
 
 // ------------------------------------------------------------ zoom lenses
 let lensWizardOpen = false, lensPrev = null, lensEdit = null, lwPoints = [], lwServo = false;
-let lwSliding = 0, lwSlideSent = 0;
+let lwSliding = 0, lwSlideSent = 0, lwLearnTimer = null;
 function zoomEnds(zc) {
   const l = status && status.lens && status.lens.list.find((x) => x.name === status.lens.current);
   return l ? [l.wide, l.tele] : [zc.min, zc.max];
@@ -663,7 +663,8 @@ function renderLens(lens, za) {
   const sel = $("lens-select");
   const key = JSON.stringify([lens.list.map((l) => [l.name, l.focal_min, l.focal_max]), lens.current]);
   if (sel.dataset.key !== key && document.activeElement !== sel) {
-    sel.innerHTML = `<option value="">No lens (motor direction)</option>`
+    const zc = axisCfg("zoom");
+    sel.innerHTML = `<option value="">${zc && zc.servo ? "No lens (zoom locked)" : "No lens (motor direction)"}</option>`
       + lens.list.map((l) => `<option value="${escapeHtml(l.name)}">${escapeHtml(l.name)} · ${l.focal_min}-${l.focal_max} mm</option>`).join("")
       + `<option value="__new">+ Learn a new lens…</option>`;
     sel.value = lens.current || "";
@@ -692,7 +693,9 @@ function renderLens(lens, za) {
     const lm = $("lim-tilt-max");
     if (lm && cur.tilt_max != null) lm.textContent = `${fmtPos(cur.tilt_max, tu)} (lens)`;
   }
-  $("lens-info").textContent = lens.focal != null ? `${Math.round(lens.focal)} mm` : "";
+  $("lens-info").textContent = lens.focal != null ? `${Math.round(lens.focal)} mm`
+    : lens.locked ? "🔒 zoom locked: choose the lens fitted" : "";
+  $("lens-info").classList.toggle("locked", !!lens.locked);
   if (lens.focal != null && $("ro-val-zoom")) $("ro-val-zoom").textContent = `${Math.round(lens.focal)} mm`;
   if (lensWizardOpen && za) renderLensWizard(za);
 }
@@ -762,12 +765,22 @@ function openLensWizard(name) {
     b.onclick = () => send({ cmd: "move_rel", zoom: parseFloat(b.dataset.d), id: "lwm" });
   });
   if (lensPrev) send({ cmd: "lens_select", name: null, id: "ls" });   // full travel, motor direction
+  if (lwServo) {      // no lens: the zoom is locked, except while learning (renewed)
+    send({ cmd: "lens_learn", on: true, id: "ll" });
+    clearInterval(lwLearnTimer);
+    lwLearnTimer = setInterval(() => send({ cmd: "lens_learn", on: true, id: "ll" }), 20000);
+  }
   lensWizardOpen = true;
   $("lens-wizard").classList.remove("hidden");
   renderLensWizard(status.axes.zoom);
 }
 function closeLensWizard(restore) {
   lensWizardOpen = false;
+  if (lwLearnTimer) {
+    clearInterval(lwLearnTimer);
+    lwLearnTimer = null;
+    send({ cmd: "lens_learn", on: false, id: "ll" });
+  }
   $("lens-wizard").classList.add("hidden");
   if (restore && lensPrev) send({ cmd: "lens_select", name: lensPrev, id: "ls" });
 }
@@ -1168,6 +1181,7 @@ function renderGpLive(pad, pads) {
   if (sliderOn) {
     const sm = gp.map.sliderMode;
     $("gp-slider-info").textContent = sm === "speed" ? `${Math.round(input.gpScale * 100)} %`
+      : sm !== "speed" && status && status.lens && status.lens.locked ? "zoom locked: no lens"
       : sm === "zoom_pos" && !(status && status.axes.zoom && status.axes.zoom.homed) ? "home zoom" : "";
   }
   if (!pad) {

@@ -51,6 +51,7 @@ Settings (axis units, stored on the Pi)
     {"cmd": "set_motion", "speed": 30, "accel": 50, "smoothing": 0.3}   all axes
     {"cmd": "set_motion", "advanced": true,
      "axis_speed": {"pan": 40, "zoom": 3}, "axis_accel": {"tilt": 20}}  per axis
+    {"cmd": "set_motion", "zoom_speed": 20}   zoom speed in focal mm/s (lens selected)
 Presets
     {"cmd": "preset_save", "preset": 1, "name": "Stage"}
     {"cmd": "preset_recall", "preset": 1, "speed": 0.8}
@@ -247,7 +248,8 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
         elif cmd == "set_motion":
             ctrl.set_motion(speed=msg.get("speed"), accel=msg.get("accel"),
                             smoothing=msg.get("smoothing"), advanced=msg.get("advanced"),
-                            axis_speed=msg.get("axis_speed"), axis_accel=msg.get("axis_accel"))
+                            axis_speed=msg.get("axis_speed"), axis_accel=msg.get("axis_accel"),
+                            zoom_speed=msg.get("zoom_speed"))
         # ------------------------------------------------ blocking mode
         elif cmd == "lock":
             if client is None:

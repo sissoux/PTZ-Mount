@@ -1001,6 +1001,7 @@ def test_zoom_lenses_both_ring_directions(tmp_path):
             await asyncio.sleep(0.02)
 
     async def t(ctrl):
+        ctrl.set_motion(zoom_speed=200)     # focal mm/s with a lens (jogs below)
         await ctrl.home(["zoom"])
         assert ctrl.zoom_sign() == 1 and ctrl.status()["lens"]["current"] is None
         assert not (await dispatch(ctrl, {"cmd": "lens_save", "name": "x", "focal_min": 70,
@@ -1030,7 +1031,7 @@ def test_zoom_lenses_both_ring_directions(tmp_path):
         assert ctrl.zoom_sign() == -1 and ctrl.status()["lens"]["focal"] == pytest.approx(24, abs=0.5)
         before = ctrl.position("zoom")
         await jog_zoom(ctrl, 0.1)                     # zoom in: the motor turns backwards
-        assert ctrl.position("zoom") < before - 3
+        assert ctrl.position("zoom") < before - 1
         f = ctrl.status()["lens"]["focal"]
         assert 24 < f < 105
         await jog_zoom(ctrl, 1.0, 1.0)                # zoom out to the wide end, no further
@@ -1398,6 +1399,59 @@ def test_servo_start_where_it_is(tmp_path):
         assert ctrl.state["pan"].flags & P.ST_ENABLED                  # the others are on
         await ctrl.servo_start(focal=50)                            # the lens selected
         assert ctrl.position("zoom") == pytest.approx(50, abs=0.05)
+    run(t, tmp_path, SERVO_CFG)
+
+
+def test_zoom_speed_in_focal_mm(tmp_path):
+    # non-linear ring: 18 -> 50 mm over 10 % of travel, 50 -> 135 mm over 50 %
+    async def t(ctrl):
+        await ctrl.servo_start(last=True)
+        await ctrl.lens_learn(True)
+        await ctrl.lens_save("Kit", 18, 135, points=[[20, 18], [30, 50], [80, 135]])
+        assert ctrl.settings()["zoom_speed"] == 20                # default, mm/s
+        ctrl.set_motion(zoom_speed=10)
+        await ctrl.zoom_to_focal(20, wait=True)
+
+        async def jog_rate(seconds):
+            t_end = asyncio.get_running_loop().time() + seconds
+            while asyncio.get_running_loop().time() < t_end:
+                ctrl.jog({"zoom": 1.0})
+                await asyncio.sleep(0.05)
+            return ctrl._cmd_vel["zoom"]
+
+        # jog: 10 mm/s = 0.3125 %/mm * 10 on the steep part, 0.588 * 10 above 50 mm
+        v1 = await jog_rate(0.4)
+        f_a = ctrl.focal_now()
+        v1b = await jog_rate(0.5)
+        f_b = ctrl.focal_now()
+        assert v1 == pytest.approx(3.125, rel=0.05) and v1b == pytest.approx(3.125, rel=0.05)
+        assert (f_b - f_a) / 0.5 == pytest.approx(10, rel=0.2)
+        ctrl.jog({"zoom": 0.0})
+        await asyncio.sleep(0.3)
+        await ctrl.zoom_to_focal(80, wait=True)
+        v2 = await jog_rate(0.5)
+        assert v2 == pytest.approx(10 * 50 / 85, rel=0.05)      # faster servo, same mm/s
+        ctrl.jog({"zoom": 0.0})
+        await asyncio.sleep(0.3)
+
+        # move: even in focal mm across the kink at 50 mm
+        ctrl.set_motion(zoom_speed=40)
+        await ctrl.zoom_to_focal(20, wait=True)
+        task = asyncio.ensure_future(ctrl.zoom_to_focal(130, wait=True))
+        samples = []
+        while not task.done():
+            samples.append((asyncio.get_running_loop().time(), ctrl.focal_now()))
+            await asyncio.sleep(0.05)
+        await task
+        cruise = [(t, f) for t, f in samples if 30 <= f <= 115]
+        rates = [(f1 - f0) / (t1 - t0) for (t0, f0), (t1, f1) in zip(cruise, cruise[1:])]
+        assert len(rates) > 10
+        low = [r for (t, f), r in zip(cruise, rates) if f < 45]
+        high = [r for (t, f), r in zip(cruise, rates) if f > 60]
+        assert low and high
+        assert sum(low) / len(low) == pytest.approx(40, rel=0.2)
+        assert sum(high) / len(high) == pytest.approx(40, rel=0.2)
+        assert ctrl.focal_now() == pytest.approx(130, abs=0.5)
     run(t, tmp_path, SERVO_CFG)
 
 

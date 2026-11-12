@@ -207,7 +207,9 @@ UART, stop Klipper, build and flash the firmware, then run `./deploy/install.sh`
   here*, *Tele end here* at the max focal, then *Save the lens*. (A stepper
   zoom with an endstop is homed first, stepped to the other end of the ring
   and you say whether it is zoomed in or out.) The focal length is
-  interpolated between the marks.
+  interpolated between the marks. With a lens the **Zoom speed** slider is
+  in focal mm/s: the servo turns faster or slower along the ring so the
+  focal length changes at that rate even where the ring is not linear.
   ✎ edits the lens (*Keep the ends learned before* to only change the name,
   focals or marks).
   *Max tilt with this lens*: *Adjust* frees the tilt (soft limits off, up

@@ -64,6 +64,7 @@ LOCAL_ADDRESSES = ("127.0.0.1", "::1", "localhost")
 SOURCE_TTL = 10.0             # s, how long a UDP/VISCA sender is listed as active
 CARS = 12                     # cars in the list (the car followed is one of them)
 CAR_NUMBER_MAX = 999          # race numbers 1..999
+ZOOM_SPEED_DEFAULT = 20.0     # mm/s of focal length, zoom speed with a lens selected
 LENS_LEARN_TTL = 60.0         # s, lens learning ends unless the wizard renews it
 ZOOM_LOCKED = ("zoom locked: no lens selected (the servo could force a lens's ring "
                "past its end). Choose the lens fitted, or learn it")
@@ -88,6 +89,9 @@ class MotionController:
         self.speed_axis = {a.name: a.jog_velocity for a in self.axes}
         self.accel_axis = {a.name: a.jog_accel for a in self.axes}
         self.smoothing = m.smoothing          # ease in/out 0..1
+        # zoom speed with a lens selected, in focal mm/s (the servo / motor
+        # speed follows the lens's curve: even zooming on a non-linear ring)
+        self.zoom_speed = ZOOM_SPEED_DEFAULT
         # Blocking mode: only the lock owner (a web client id) may move the head
         # axes in use (an absent zoom drive can be switched off live)
         self.axis_active = {a.name: a.active for a in self.axes}
@@ -437,6 +441,8 @@ class MotionController:
                 for side in ("min", "max"):
                     if isinstance(d.get(side), (int, float)):
                         self.user_limits[n][side] = float(d[side])
+        if isinstance(data.get("zoom_speed"), num) and data["zoom_speed"] > 0:
+            self.zoom_speed = float(data["zoom_speed"])
         for k in ("smoothing", "play_speed"):
             if isinstance(data.get(k), num):
                 setattr(self, k, float(data[k]))
@@ -529,6 +535,7 @@ class MotionController:
         data = {"advanced": self.advanced, "speed_all": self.speed_all,
                 "accel_all": self.accel_all, "speed_axis": self.speed_axis,
                 "accel_axis": self.accel_axis, "smoothing": self.smoothing,
+                "zoom_speed": self.zoom_speed,
                 "play_speed": self.play_speed, "axis_active": self.axis_active,
                 "user_limits": {"enabled": self.user_limits_on, "axes": self.user_limits},
                 "cars": [{"car": n, "name": c["name"]} for n, c in self.cars.items()],
@@ -560,7 +567,8 @@ class MotionController:
     def set_motion(self, speed: Optional[float] = None, accel: Optional[float] = None,
                    smoothing: Optional[float] = None, advanced: Optional[bool] = None,
                    axis_speed: Optional[Dict[str, float]] = None,
-                   axis_accel: Optional[Dict[str, float]] = None) -> None:
+                   axis_accel: Optional[Dict[str, float]] = None,
+                   zoom_speed: Optional[float] = None) -> None:
         """speed / accel: common value (units/s, units/s^2) of simple mode.
         axis_speed / axis_accel: per-axis values of advanced mode.
         smoothing: ease in/out amount (0 = sharp, 1 = softest)."""
@@ -584,6 +592,8 @@ class MotionController:
             self.accel_axis[n] = clamp(float(v), 1e-3, ax.max_accel)
         if smoothing is not None:
             self.smoothing = clamp(float(smoothing), 0.0, 1.0)
+        if zoom_speed is not None:
+            self.zoom_speed = clamp(float(zoom_speed), 0.1, 2000.0)
         self._save_settings()
 
     def settings(self) -> dict:
@@ -596,6 +606,7 @@ class MotionController:
             "effective_speed": {a.name: round(self.speed_of(a.name), 3) for a in self.axes},
             "effective_accel": {a.name: round(self.accel_of(a.name), 3) for a in self.axes},
             "smoothing": self.smoothing,
+            "zoom_speed": round(self.zoom_speed, 3),    # focal mm/s, with a lens
             "ease_s": round(self._smooth_time(), 3),
             "play_speed": self.play_speed,
             "play_loop": self.play_loop,
@@ -926,6 +937,33 @@ class MotionController:
             raise MotionError("focal must be a number (mm)") from None
         frac = self._interp(self._focal_curve(lens), focal, 1, 0)
         return lens["wide"] + frac * (lens["tele"] - lens["wide"])
+
+    def _position_to_focal(self, lens: dict, pos: float) -> float:
+        w, t = lens["wide"], lens["tele"]
+        return self._interp(self._focal_curve(lens), (pos - w) / (t - w), 0, 1)
+
+    def _focal_segments(self, lens: dict) -> List[Tuple[float, float, float]]:
+        """(focal from, focal to, |zoom units per mm|) of each piece of the
+        lens's curve (focal increases along it: lens_save checks the order)."""
+        curve, span = self._focal_curve(lens), abs(lens["tele"] - lens["wide"])
+        return [(a[1], b[1], span * (b[0] - a[0]) / (b[1] - a[1]))
+                for a, b in zip(curve, curve[1:]) if b[1] > a[1]]
+
+    def _focal_rate(self, lens: dict, focal: float, direction: int) -> float:
+        """|d zoom position / d focal| where the zoom is, for a move towards
+        tele (direction > 0) or wide (< 0)."""
+        segs = self._focal_segments(lens)
+        if not segs:
+            return 0.0
+        for f0, f1, r in segs:
+            if (f0 <= focal < f1) if direction > 0 else (f0 < focal <= f1):
+                return r
+        return segs[-1][2] if direction > 0 else segs[0][2]
+
+    def _focal_rate_max(self, lens: dict, fa: float, fb: float) -> float:
+        lo, hi = min(fa, fb), max(fa, fb)
+        return max((r for f0, f1, r in self._focal_segments(lens) if f1 > lo and f0 < hi),
+                   default=0.0)
 
     async def zoom_to_focal(self, focal: float, speed: float = 1.0, wait: bool = False) -> None:
         await self.goto({"zoom": self.focal_to_position(focal)}, speed=speed, wait=wait)
@@ -1329,6 +1367,14 @@ class MotionController:
             amax = self.accel_of(name)
             jerk = amax / smooth if smooth > 1e-3 else math.inf
             target = st.jog_value * self.speed_of(name)
+            if name == "zoom" and st.jog_value and st.homed:
+                lens = self._lens()
+                if lens is not None:     # focal mm/s: the speed follows the lens's curve
+                    up = (lens["tele"] > lens["wide"]) == (st.jog_value > 0)
+                    rate = self._focal_rate(lens, self._position_to_focal(
+                        lens, self.position(name)), 1 if up else -1)
+                    target = clamp(st.jog_value * self.zoom_speed * rate,
+                                   -ax.max_velocity, ax.max_velocity)
             st.braking = False
             if mix:                                   # level frame rate, mixed below
                 world[name] = sh.step(target, amax, jerk, dt)
@@ -1528,7 +1574,23 @@ class MotionController:
             amax[name] = self.accel_of(name)
         if not final:
             return None
-        return MoveTrajectory(start, final, vmax, amax, self._smooth_time())
+        coords = {}
+        lens = self._lens() if "zoom" in final else None
+        if lens is not None and self.state["zoom"].homed:
+            # the zoom moves evenly in focal mm (zoom_speed), whatever the
+            # lens's curve; the servo / motor speed is capped by max_velocity
+            ax = self.cfg.axes["zoom"]
+            p0, p1 = start["zoom"], final["zoom"]
+            w, t = sorted((lens["wide"], lens["tele"]))
+            f0, f1 = self._position_to_focal(lens, p0), self._position_to_focal(lens, p1)
+            if w - 1e-6 <= p0 <= t + 1e-6 and abs(f1 - f0) > 1e-6 and abs(p1 - p0) > 1e-9:
+                rate = self._focal_rate_max(lens, f0, f1)
+                vmax["zoom"] = self.zoom_speed * k
+                if rate > 0:
+                    vmax["zoom"] = min(vmax["zoom"], ax.max_velocity / rate)
+                amax["zoom"] *= abs(f1 - f0) / abs(p1 - p0)
+                coords["zoom"] = (f0, f1, lambda f, L=lens: self.focal_to_position(f, L))
+        return MoveTrajectory(start, final, vmax, amax, self._smooth_time(), coords)
 
     async def move_relative(self, deltas: Dict[str, float], speed: float = 1.0,
                             wait: bool = False) -> None:

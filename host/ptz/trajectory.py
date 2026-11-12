@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import bisect
 import math
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -215,13 +215,21 @@ class MoveTrajectory:
     """Straight-line (in joint space) synchronized move with ease in/out."""
 
     def __init__(self, start: Dict[str, float], target: Dict[str, float],
-                 vmax: Dict[str, float], amax: Dict[str, float], smooth: float):
+                 vmax: Dict[str, float], amax: Dict[str, float], smooth: float,
+                 coords: Optional[Dict[str, tuple]] = None):
+        """coords: {axis: (u0, u1, to_position)}: that axis moves linearly
+        in its own coordinate u (e.g. the zoom in focal mm along a lens's
+        curve), its vmax / amax in u units; to_position(u) gives the axis
+        position (start / target stay in position units)."""
         self.start, self.final = dict(start), dict(target)
         self.delta = {n: target[n] - start[n] for n in target}
-        moving = [n for n, d in self.delta.items() if abs(d) > 1e-9]
+        self.coords = dict(coords or {})
+        span = {n: (self.coords[n][1] - self.coords[n][0]) if n in self.coords
+                else self.delta[n] for n in target}
+        moving = [n for n, d in span.items() if abs(d) > 1e-9]
         if moving:
-            vs = min(vmax[n] / abs(self.delta[n]) for n in moving)
-            as_ = min(amax[n] / abs(self.delta[n]) for n in moving)
+            vs = min(vmax[n] / abs(span[n]) for n in moving)
+            as_ = min(amax[n] / abs(span[n]) for n in moving)
             self.profile = SCurveProfile(vs, as_, smooth)
             self.duration = self.profile.duration
         else:
@@ -244,7 +252,18 @@ class MoveTrajectory:
         if self.profile is None:
             return {n: (self.final[n], 0.0) for n in self.axes}
         s, ds = self.profile.sample(self.t)
-        return {n: (self.start[n] + self.delta[n] * s, self.delta[n] * ds) for n in self.axes}
+        out = {}
+        for n in self.axes:
+            if n in self.coords:
+                u0, u1, to_pos = self.coords[n]
+                du = u1 - u0
+                u = u0 + du * s
+                h = 1e-4 * du                         # d position / du, numerically
+                dpdu = (to_pos(u + h) - to_pos(u - h)) / (2 * h) if h else 0.0
+                out[n] = (to_pos(u), dpdu * du * ds)
+            else:
+                out[n] = (self.start[n] + self.delta[n] * s, self.delta[n] * ds)
+        return out
 
 
 class PlaybackTrajectory:

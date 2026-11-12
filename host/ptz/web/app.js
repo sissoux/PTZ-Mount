@@ -125,7 +125,8 @@ function buildAxisSliders() {
     for (const [kind, max, fmt] of [["speed", a.max_velocity, fmtSpeed], ["accel", a.max_accel, fmtAccel]]) {
       const id = `ax-${kind}-${a.name}`;
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${a.name} ${kind === "speed" ? "speed" : "accel."}</td>
+      const note = a.name === "zoom" && kind === "speed" ? ` title="Used with no lens selected (learning). With a lens: Zoom speed, in focal mm/s"` : "";
+      tr.innerHTML = `<td${note}>${a.name} ${kind === "speed" ? "speed" : "accel."}${note ? " (no lens)" : ""}</td>
         <td><input id="${id}" type="range" min="0" max="${max}" step="${max / 200}"></td>
         <td class="val" id="${id}-val"></td>`;
       tb.appendChild(tr);
@@ -347,6 +348,13 @@ function renderSettings(st) {
   const capped = config.axes.filter((a) => st.effective_speed[a.name] < st.speed_all - 1e-6)
     .map((a) => `${a.name} ${fmtSpeed(st.effective_speed[a.name], a.units)}`);
   $("speed").title = capped.length ? `Capped: ${capped.join(", ")}` : "";
+  // with a lens: the zoom speed is in focal mm/s (slider up to the whole range in 0.5 s)
+  const zl = status && status.lens && status.lens.list.find((l) => l.name === status.lens.current);
+  $("zoom-speed-row").classList.toggle("hidden", !zl || st.zoom_speed == null);
+  if (zl && st.zoom_speed != null) {
+    $("zoom-speed").max = Math.max(20, 2 * (zl.focal_max - zl.focal_min));
+    syncSlider("zoom-speed", st.zoom_speed, `${fmtNum(st.zoom_speed)} mm/s`);
+  }
   syncSlider("smoothing", st.smoothing, st.smoothing > 0 ? `${st.ease_s.toFixed(2)} s` : "off");
   syncSlider("play-speed", st.play_speed, times(st.play_speed), Math.log2);
   if (document.activeElement !== $("play-loop")) $("play-loop").checked = !!st.play_loop;
@@ -370,6 +378,13 @@ $("smoothing").oninput = () => {
   $("smoothing-val").textContent = v > 0 && config ? `${(v * config.ease_time).toFixed(2)} s` : "off";
   clearTimeout(smoothTimer);
   smoothTimer = setTimeout(() => send({ cmd: "set_motion", smoothing: v }), 80);
+};
+let zoomSpeedTimer = null;
+$("zoom-speed").oninput = () => {
+  const v = Math.max(parseFloat($("zoom-speed").value), 0.5);
+  $("zoom-speed-val").textContent = `${fmtNum(v)} mm/s`;
+  clearTimeout(zoomSpeedTimer);
+  zoomSpeedTimer = setTimeout(() => send({ cmd: "set_motion", zoom_speed: v }), 80);
 };
 $("advanced").onchange = () => send({ cmd: "set_motion", advanced: $("advanced").checked, id: "adv" });
 

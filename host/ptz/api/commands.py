@@ -357,6 +357,7 @@ def config_summary(ctrl: MotionController) -> dict:
             "gear_ratio": a.gear_ratio, "rotation_distance": a.rotation_distance,
             "max_accel_steps": a.max_accel * a.steps_per_unit,
             "max_velocity_steps": a.max_velocity * a.steps_per_unit,
+            "servo": a.servo, "pulse_min": a.pulse_min, "pulse_max": a.pulse_max,
             "homing_positive_dir": a.homing_positive_dir,
             "endstop_guard": a.has_endstop and a.endstop_guard,
             "run_current": a.tmc.run_current if a.tmc is not None else None,

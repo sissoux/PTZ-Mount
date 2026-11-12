@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .protocol import MAX_AXES, PIN_NONE
+from .protocol import MAX_AXES, PIN_NONE, SERVO_TICKS_PER_US
 
 #: Max step rate per axis of the firmware (STEP_TICK_HZ / 2 in firmware/src/config.h)
 MCU_MAX_STEP_RATE = 20000.0
@@ -50,6 +50,43 @@ def parse_pin(text: Optional[str]) -> Pin:
 
 def _units(text: str) -> str:
     return {"deg": "°", "degree": "°", "degrees": "°"}.get(text.strip().lower(), text.strip())
+
+
+def _pulse_us(s: "_Section", key: str, default: float) -> float:
+    """Pulse width in us; Klipper's [servo] style seconds (0.001) accepted."""
+    v = s.getfloat(key, default)
+    if 0 < v < 0.1:
+        v *= 1e6
+    if not 100 <= v <= 3000:
+        raise ConfigError(f"[{s.name}] {key}: {v:g} us, expected 100..3000 us "
+                          "(or seconds, Klipper style: 0.001)")
+    return v
+
+
+def _servo_axis(s: "_Section", name: str, aname: str, index: int, pin: "Pin",
+                pmin: float, pmax: float, max_vel: float, max_acc: float,
+                park: Optional[float]) -> "AxisConfig":
+    """[axis ...] with servo_pin: a hobby servo on a PWM output of the MCU."""
+    pw_min = _pulse_us(s, "minimum_pulse_width", 1000.0)
+    pw_max = _pulse_us(s, "maximum_pulse_width", 2000.0)
+    if pw_max <= pw_min:
+        raise ConfigError(f"[{name}] maximum_pulse_width must be > minimum_pulse_width")
+    if pin.invert or pin.pullup:
+        raise ConfigError(f"[{name}] servo_pin: no '!' / '^' on a servo output")
+    spu = SERVO_TICKS_PER_US * (pw_max - pw_min) / (pmax - pmin)
+    return AxisConfig(
+        name=aname, index=index, step_pin=pin, dir_pin=Pin(), enable_pin=Pin(),
+        endstop_pin=Pin(), microsteps=1, full_steps_per_rotation=1, gear_ratio=1.0,
+        rotation_distance=1.0, position_min=pmin, position_max=pmax,
+        position_endstop=pmin, homing_positive_dir=False, homing_speed=max_vel,
+        second_homing_speed=max_vel, homing_retract_dist=0.0, park_position=park,
+        max_velocity=max_vel, max_accel=max_acc,
+        jog_velocity=s.getfloat("jog_velocity", max_vel, 0, max_vel),
+        jog_accel=s.getfloat("jog_accel", max_acc, 0, max_acc),
+        home_with_all=s.getbool("home_with_all", True),
+        units=_units(s.get("units", "%")), active=s.getbool("active", True),
+        endstop_guard=False, servo=True, pulse_min=pw_min, pulse_max=pw_max,
+        servo_spu=spu, step_offset=SERVO_TICKS_PER_US * pw_min - pmin * spu)
 
 
 def parse_ratio(text: Optional[str]) -> float:
@@ -190,17 +227,33 @@ class AxisConfig:
     endstop_guard: bool = True       # MCU halts the axis on its endstop outside homing
     shutdown_position: object = None  # None, "min", "max" or a position (shutdown park)
     tmc: Optional[TmcConfig] = None
+    # Hobby servo (position loop in the servo, no endstop, no homing): the
+    # MCU position is the pulse width (SERVO_TICKS_PER_US steps per us),
+    # position_min / position_max map to pulse_min / pulse_max (us).
+    servo: bool = False
+    pulse_min: float = 0.0
+    pulse_max: float = 0.0
+    servo_spu: float = 0.0           # steps per unit (servo)
+    step_offset: float = 0.0         # steps at position 0 (servo)
 
     @property
     def steps_per_unit(self) -> float:
+        if self.servo:
+            return self.servo_spu
         return (self.full_steps_per_rotation * self.microsteps * self.gear_ratio
                 / self.rotation_distance)
 
     def to_steps(self, units: float) -> int:
-        return int(round(units * self.steps_per_unit))
+        """Position (units) -> MCU position (steps). Not for distances."""
+        return int(round(units * self.steps_per_unit + self.step_offset))
 
     def to_units(self, steps: float) -> float:
-        return steps / self.steps_per_unit
+        """MCU position (steps) -> position (units). Not for speeds."""
+        return (steps - self.step_offset) / self.steps_per_unit
+
+    def pulse_us(self, units: float) -> float:
+        """Servo pulse width (us) at this position."""
+        return self.to_steps(units) / SERVO_TICKS_PER_US
 
     @property
     def has_endstop(self) -> bool:
@@ -295,42 +348,49 @@ def load(path: str) -> PtzConfig:
             park = 0.0 if pmin <= 0.0 <= pmax else None
         else:
             park = s.getfloat("park_position")
-        ax = AxisConfig(
-            name=aname, index=len(axes),
-            step_pin=parse_pin(s.get("step_pin", _REQUIRED)),
-            dir_pin=parse_pin(s.get("dir_pin", _REQUIRED)),
-            enable_pin=parse_pin(s.get("enable_pin", "")),
-            endstop_pin=parse_pin(s.get("endstop_pin", "")),
-            microsteps=s.getint("microsteps", 16),
-            full_steps_per_rotation=s.getint("full_steps_per_rotation", 200),
-            gear_ratio=parse_ratio(s.get("gear_ratio", "")),
-            rotation_distance=s.getfloat("rotation_distance", _REQUIRED, 0),
-            position_min=pmin, position_max=pmax,
-            position_endstop=s.getfloat("position_endstop", pmin),
-            homing_positive_dir=s.getbool("homing_positive_dir", False),
-            homing_speed=homing_speed,
-            second_homing_speed=s.getfloat("second_homing_speed", homing_speed / 2, 0),
-            homing_retract_dist=s.getfloat("homing_retract_dist", 5, 0),
-            park_position=park,
-            max_velocity=max_vel, max_accel=max_acc,
-            jog_velocity=s.getfloat("jog_velocity", max_vel, 0, max_vel),
-            jog_accel=s.getfloat("jog_accel", max_acc, 0, max_acc),
-            home_with_all=s.getbool("home_with_all", True),
-            units=_units(s.get("units", "°")),
-            active=s.getbool("active", True),
-        )
-        # Endstop guard: only meaningful when the switch sits at the end of
-        # travel. If position_endstop is inside [min, max] (switch in the middle
-        # of the range, as on the original Klipper setup), the switch may be
-        # pressed during normal moves, so the guard is off by default.
-        guard = (s.get("endstop_guard", "auto") or "auto").lower()
-        if guard == "auto":
-            if ax.homing_positive_dir:
-                ax.endstop_guard = ax.position_endstop >= pmax
-            else:
-                ax.endstop_guard = ax.position_endstop <= pmin
+        servo_txt = s.get("servo_pin", "")
+        if servo_txt:
+            # start position (nothing remembered yet): park_position if set,
+            # else the middle of the range (the servo's neutral)
+            ax = _servo_axis(s, name, aname, len(axes), parse_pin(servo_txt),
+                             pmin, pmax, max_vel, max_acc, park if park_txt else None)
         else:
-            ax.endstop_guard = guard in ("1", "true", "yes", "on")
+            ax = AxisConfig(
+                name=aname, index=len(axes),
+                step_pin=parse_pin(s.get("step_pin", _REQUIRED)),
+                dir_pin=parse_pin(s.get("dir_pin", _REQUIRED)),
+                enable_pin=parse_pin(s.get("enable_pin", "")),
+                endstop_pin=parse_pin(s.get("endstop_pin", "")),
+                microsteps=s.getint("microsteps", 16),
+                full_steps_per_rotation=s.getint("full_steps_per_rotation", 200),
+                gear_ratio=parse_ratio(s.get("gear_ratio", "")),
+                rotation_distance=s.getfloat("rotation_distance", _REQUIRED, 0),
+                position_min=pmin, position_max=pmax,
+                position_endstop=s.getfloat("position_endstop", pmin),
+                homing_positive_dir=s.getbool("homing_positive_dir", False),
+                homing_speed=homing_speed,
+                second_homing_speed=s.getfloat("second_homing_speed", homing_speed / 2, 0),
+                homing_retract_dist=s.getfloat("homing_retract_dist", 5, 0),
+                park_position=park,
+                max_velocity=max_vel, max_accel=max_acc,
+                jog_velocity=s.getfloat("jog_velocity", max_vel, 0, max_vel),
+                jog_accel=s.getfloat("jog_accel", max_acc, 0, max_acc),
+                home_with_all=s.getbool("home_with_all", True),
+                units=_units(s.get("units", "°")),
+                active=s.getbool("active", True),
+            )
+            # Endstop guard: only meaningful when the switch sits at the end of
+            # travel. If position_endstop is inside [min, max] (switch in the middle
+            # of the range, as on the original Klipper setup), the switch may be
+            # pressed during normal moves, so the guard is off by default.
+            guard = (s.get("endstop_guard", "auto") or "auto").lower()
+            if guard == "auto":
+                if ax.homing_positive_dir:
+                    ax.endstop_guard = ax.position_endstop >= pmax
+                else:
+                    ax.endstop_guard = ax.position_endstop <= pmin
+            else:
+                ax.endstop_guard = guard in ("1", "true", "yes", "on")
         if max_vel * ax.steps_per_unit > MCU_MAX_STEP_RATE:
             raise ConfigError(
                 f"[{name}] max_velocity {max_vel} needs {max_vel * ax.steps_per_unit:.0f} "
@@ -358,6 +418,9 @@ def load(path: str) -> PtzConfig:
                 raise ConfigError(f"[{name}] shutdown_position outside limits")
         ax.shutdown_position = sd
         tname = f"tmc2209 {aname}"
+        if ax.servo and cp.has_section(tname):
+            raise ConfigError(f"[{tname}]: [{name}] is a servo (servo_pin), it has no "
+                              "stepper driver: remove this section")
         if cp.has_section(tname):
             t = sec(tname)
             # Klipper puts the bus pins in every [tmc2209] section: accept them

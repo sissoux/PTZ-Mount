@@ -40,6 +40,7 @@ function showError(msg) { $("error").textContent = msg || ""; }
 
 const cfgAxis = () => (config ? config.axes.find((a) => a.name === axis) : null);
 const revSteps = (a) => a.full_steps * a.microsteps;          // microsteps per motor turn
+const SERVO_STEPS_PER_US = 2;                                  // servo: 1 step = 0.5 us of pulse
 const fmt = (v, d = 2) => (Math.round(v * 10 ** d) / 10 ** d).toLocaleString("en-US");
 
 function onConfig() {
@@ -53,6 +54,8 @@ function onConfig() {
 function onAxis() {
   const a = cfgAxis();
   if (!a) return;
+  if (a.servo) { onServoAxis(a); return; }
+  $("in-steps").step = 1;
   const rev = revSteps(a);
   $("cfg").innerHTML = [
     ["Microsteps", a.microsteps],
@@ -92,9 +95,53 @@ function onAxis() {
   render();
 }
 
+// Servo axis (servo_pin): position = pulse width, 0.5 us per step, no
+// endstop, raw moves stay within the configured pulse range.
+function onServoAxis(a) {
+  const us = SERVO_STEPS_PER_US;
+  $("cfg").innerHTML = [
+    ["Type", "hobby servo (PWM, 50 Hz)"],
+    ["Pulse range", `${a.pulse_min}..${a.pulse_max} µs = ${a.min}..${a.max} ${a.units}`],
+    ["Steps", "0.5 µs of pulse each"],
+    ["Steps / " + a.units, fmt(a.steps_per_unit, 3)],
+    ["Max speed", `${Math.round(a.max_velocity_steps / us).toLocaleString("en-US")} µs/s (${a.max_velocity} ${a.units}/s)`],
+    ["Max accel", `${Math.round(a.max_accel_steps / us).toLocaleString("en-US")} µs/s²`],
+    ["Endstop", "none (the servo holds its own position)"],
+  ].map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("");
+  $("quick-steps").innerHTML = [["1 µs", 1], ["10 µs", 10], ["50 µs", 50], ["100 µs", 100], ["500 µs", 500]]
+    .map(([l, v]) => `<button class="small" data-steps="${v * us}">${l}</button>`).join("");
+  $("quick-steps").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => { $("in-steps").value = b.dataset.steps; updateEq(); };
+  });
+  const vmax = a.max_velocity_steps;
+  $("quick-speed").innerHTML = [["50 µs/s", 50 * us], ["200 µs/s", 200 * us], ["500 µs/s", 500 * us], ["max", vmax]]
+    .filter(([l, v]) => l === "max" || v < vmax)
+    .map(([l, v]) => `<button class="small" data-speed="${Math.round(v)}">${l}</button>`).join("");
+  $("quick-speed").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => { $("in-speed").value = b.dataset.speed; updateEq(); };
+  });
+  const s = parseFloat(store.get(`steps-${axis}`, "")), v = parseFloat(store.get(`speed-${axis}`, ""));
+  $("in-steps").value = s > 0 ? s : 100 * us;
+  $("in-speed").value = v > 0 ? v : Math.min(200 * us, Math.round(vmax));
+  $("dir-hint").textContent = `+ lengthens the pulse. A move stops at the end of the pulse range `
+    + `(${a.pulse_min}..${a.pulse_max} µs in the config): widen it there only if the servo allows it.`;
+  updateEq();
+  render();
+}
+
 function updateEq() {
   const a = cfgAxis();
   if (!a) return;
+  if (a.servo) {
+    const s = parseFloat($("in-steps").value), v = parseFloat($("in-speed").value), us = SERVO_STEPS_PER_US;
+    $("eq-steps").textContent = s > 0 ? `= ${fmt(s / us, 1)} µs of pulse, ${fmt(s / a.steps_per_unit, 2)} ${a.units}` : "";
+    let t = v > 0 ? `= ${fmt(v / us, 1)} µs/s, ${fmt(v / a.steps_per_unit, 2)} ${a.units}/s` : "";
+    if (v > a.max_velocity_steps) t += ` — capped at ${Math.round(a.max_velocity_steps)} steps/s (max_velocity)`;
+    $("eq-speed").textContent = t;
+    if (s > 0) store.set(`steps-${axis}`, s);
+    if (v > 0) store.set(`speed-${axis}`, v);
+    return;
+  }
   const rev = revSteps(a);
   const s = parseFloat($("in-steps").value), v = parseFloat($("in-speed").value);
   $("eq-steps").textContent = s > 0
@@ -117,19 +164,27 @@ function render() {
   const a = cfgAxis(), st = status.axes[axis];
   if (!a || !st) return;
   $("steps").textContent = st.steps.toLocaleString("en-US");
-  const rev = revSteps(a);
-  $("steps-sub").textContent = `${fmt(st.steps / rev, 3)} motor turns · ${fmt(st.pos, 3)} ${a.units}`
-    + ` · ${fmt(st.vel * a.steps_per_unit, 0)} steps/s`;
   const z = zero[axis];
-  $("rel").textContent = z == null ? "" : `since zero: ${(st.steps - z).toLocaleString("en-US")} steps`
-    + ` (${fmt((st.steps - z) / rev, 3)} turns)`;
+  if (a.servo) {
+    const us = SERVO_STEPS_PER_US;
+    $("steps-sub").textContent = `pulse ${fmt(st.pulse, 1)} µs · ${fmt(st.pos, 2)} ${a.units}`
+      + ` · ${fmt(st.vel * a.steps_per_unit / us, 0)} µs/s`;
+    $("rel").textContent = z == null ? "" : `since zero: ${fmt((st.steps - z) / us, 1)} µs`;
+  } else {
+    const rev = revSteps(a);
+    $("steps-sub").textContent = `${fmt(st.steps / rev, 3)} motor turns · ${fmt(st.pos, 3)} ${a.units}`
+      + ` · ${fmt(st.vel * a.steps_per_unit, 0)} steps/s`;
+    $("rel").textContent = z == null ? "" : `since zero: ${(st.steps - z).toLocaleString("en-US")} steps`
+      + ` (${fmt((st.steps - z) / rev, 3)} turns)`;
+  }
   $("flags").innerHTML = [
     st.active ? flag("on", "on") : flag("off", "bad"),
     st.enabled ? flag("powered", "on") : flag("unpowered", "warn"),
     st.moving ? flag("moving", "on") : flag("still"),
     a.has_endstop ? (st.endstop ? flag("endstop TRIGGERED", "warn") : flag("endstop open")) : "",
     st.halted ? flag("halted on endstop", "warn") : "",
-    st.homed ? flag("homed", "on") : flag("not homed"),
+    a.servo ? (st.available === false ? flag("needs new firmware", "bad") : flag("servo", "on"))
+      : st.homed ? flag("homed", "on") : flag("not homed"),
     st.raw ? flag("raw move", "on") : "",
     status.estop ? flag("E-STOP", "bad") : "",
     status.ready ? "" : flag("MCU not ready", "bad"),
@@ -137,9 +192,13 @@ function render() {
   $("chk-active").checked = st.active;
   $("chk-enabled").checked = st.enabled;
   $("chk-enabled").disabled = !st.active;
-  $("power-hint").textContent = !st.active ? "Axis off: its driver is unpowered (safe to plug the motor)."
-    : !st.enabled ? "Driver unpowered: the shaft turns freely by hand. Power it to move."
-      : "";
+  $("power-hint").textContent = a.servo
+    ? (st.available === false ? status.mcu_warning
+      : !st.active || !st.enabled ? "No pulse: the servo is released (a digital servo may still hold)."
+        : "Pulses on: the servo holds the position shown.")
+    : !st.active ? "Axis off: its driver is unpowered (safe to plug the motor)."
+      : !st.enabled ? "Driver unpowered: the shaft turns freely by hand. Power it to move."
+        : "";
   const can = st.active && st.enabled && status.ready && !status.estop;
   $("btn-plus").disabled = $("btn-minus").disabled = !can;
   const e = $("btn-estop");

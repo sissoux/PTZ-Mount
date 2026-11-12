@@ -52,6 +52,7 @@ class SimAxis:
         self.lim_max = 0
         self.at_limit = False
         self.halted = False
+        self.servo = False
         self.guard_dir = 0
 
     def endstop_active(self) -> bool:
@@ -63,7 +64,8 @@ class SimAxis:
 
 
 class SimTransport:
-    def __init__(self):
+    def __init__(self, protocol_version: int = P.PROTOCOL_VERSION):
+        self.protocol_version = protocol_version    # older firmware: e.g. 1, no servo
         self.axes = [SimAxis() for _ in range(P.MAX_AXES)]
         self.estop = False
         self.watchdog_ms = 300
@@ -109,7 +111,7 @@ class SimTransport:
     def _handle(self, m: P.Message):
         n, f = m.name, m.fields
         if n == "PING":
-            self._emit("PONG", m.seq, protocol_version=P.PROTOCOL_VERSION,
+            self._emit("PONG", m.seq, protocol_version=self.protocol_version,
                        max_axes=P.MAX_AXES, uptime_ms=self._ms())
         elif n == "RESET":
             self.axes = [SimAxis() for _ in range(P.MAX_AXES)]
@@ -124,8 +126,11 @@ class SimTransport:
         elif n == "CONFIG_AXIS":
             if f["axis"] >= P.MAX_AXES:
                 return self._ack(m, 3)
+            if f["flags"] & P.AXF_SERVO and self.protocol_version < 2:
+                return self._ack(m, 3)              # v1 firmware: no servo output
             a = self.axes[f["axis"]]
             a.configured = True
+            a.servo = bool(f["flags"] & P.AXF_SERVO)   # counted position = pulse width
             a.max_vel = min(f["max_vel"], MAX_STEP_RATE)
             a.max_accel = f["max_accel"]
             a.vel_accel = min(f["vel_accel"], f["max_accel"]) or f["max_accel"]

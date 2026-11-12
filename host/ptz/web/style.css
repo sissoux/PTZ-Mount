@@ -319,3 +319,6 @@ body.live .car-btn b { font-size: 22px; }
 .chip { display: inline-flex; align-items: center; gap: 2px; background: #15171a; border: 1px solid var(--line);
         border-radius: 12px; padding: 1px 2px 1px 10px; font-size: 12px; }
 .chip button { border: none; background: none; padding: 0 6px; }
+
+/* ---- v0.14: servo zoom ---- */
+.lw-slider { width: 100%; margin-top: 10px; }

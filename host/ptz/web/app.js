@@ -320,8 +320,9 @@ function renderStatus(s) {
   renderRecorder(s.recording || {}, s.playback);
   if (s.cars) renderCars(s.cars);
   renderTracking(s.tracking || {}, s.recording || {});
-  $("config-banner").classList.toggle("hidden", !s.config_error);
-  $("config-banner").textContent = s.config_error ? `Configuration: ${s.config_error}` : "";
+  const banner = [s.config_error && `Configuration: ${s.config_error}`, s.mcu_warning].filter(Boolean);
+  $("config-banner").classList.toggle("hidden", !banner.length);
+  $("config-banner").textContent = banner.join(" · ");
 }
 
 function renderSettings(st) {
@@ -652,7 +653,8 @@ $("btn-car-add").onclick = followTyped;
 $("car-add").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); followTyped(); } };
 
 // ------------------------------------------------------------ zoom lenses
-let lensWizardOpen = false, lensPrev = null, lensEdit = null, lwPoints = [];
+let lensWizardOpen = false, lensPrev = null, lensEdit = null, lwPoints = [], lwServo = false;
+let lwSliding = 0, lwSlideSent = 0;
 function zoomEnds(zc) {
   const l = status && status.lens && status.lens.list.find((x) => x.name === status.lens.current);
   return l ? [l.wide, l.tele] : [zc.min, zc.max];
@@ -726,15 +728,36 @@ function openLensWizard(name) {
   $("lw-fmax").value = l ? l.focal_max : "";
   $("lw-msg").textContent = "";
   lensEdit = l;
+  lwServo = !!zc.servo;
   lwPoints = l ? (l.points || []).map((p) => [p[0], p[1]]) : [];
+  if (l && lwServo) lwPoints.push([l.wide, l.focal_min], [l.tele, l.focal_max]);   // the ends are marks
   renderLwMarks();
   $("lw-keep").classList.toggle("hidden", !l);
   const big = niceStep((zc.max - zc.min) / 25), steps = [big, niceStep(big / 5), niceStep(big / 25)];
   const u = zc.units === "°" ? "°" : ` ${zc.units}`;
-  $("lw-steps").innerHTML = `<span class="muted">back to the endstop</span>`
+  $("lw-steps").innerHTML = `<span class="muted">${lwServo ? "" : "back to the endstop"}</span>`
     + steps.map((d) => `<button class="small" data-d="${-d}">−${d}${u}</button>`).join("")
     + [...steps].reverse().map((d) => `<button class="small" data-d="${d}">+${d}${u}</button>`).join("")
-    + `<span class="muted">away from the endstop</span>`;
+    + `<span class="muted">${lwServo ? "" : "away from the endstop"}</span>`;
+  // servo: no endstop, no homing; move anywhere, the min / max focal marks are the ends
+  $("lw-h1").textContent = lwServo ? "1 · Zoom servo on" : "1 · Zoom at the endstop";
+  $("lw-h2").textContent = lwServo ? "2 · Move the zoom and mark the focal lengths" : "2 · Turn the ring to its other end";
+  $("lw-pos-note").textContent = lwServo ? "" : "from the endstop";
+  $("lw-marks-label").textContent = lwServo
+    ? "At each focal length printed on the barrel (e.g. 35, 50, 85),"
+    : "Focal marks (optional): at each focal printed on the barrel,";
+  $("lw-hint").textContent = lwServo
+    ? "Move with the slider, the steps or the zoom rocker (servo direction while learning); "
+      + "only the zoom moves. Stop at each end of the zoom without forcing the servo."
+    : "Move away from the endstop step by step until the ring reaches its other end; stop just "
+      + "before the motor forces. The zoom rocker also works (motor direction while learning).";
+  $("lw-h3").textContent = lwServo ? "3 · The two ends, then save" : "3 · Which end is it?";
+  $("lw-servo-ends").classList.toggle("hidden", !lwServo);
+  $("lw-stepper-ends").classList.toggle("hidden", lwServo);
+  $("lw-home").classList.toggle("hidden", lwServo);
+  const sl = $("lw-slider");
+  sl.classList.toggle("hidden", !lwServo);
+  sl.min = zc.min; sl.max = zc.max; sl.step = (zc.max - zc.min) / 1000;
   $("lw-steps").querySelectorAll("[data-d]").forEach((b) => {
     b.onclick = () => send({ cmd: "move_rel", zoom: parseFloat(b.dataset.d), id: "lwm" });
   });
@@ -750,18 +773,25 @@ function closeLensWizard(restore) {
 }
 function renderLensWizard(za) {
   const on = za.active !== false, ready = on && za.homed;
-  $("lw-state").textContent = !on ? "Zoom drive off" : za.homing ? "Homing…"
-    : !za.homed ? "Not homed: homing turns the ring until the endstop" : "Homed ✓";
+  $("lw-state").textContent = lwServo
+    ? (za.available === false ? "Unavailable: reflash the board firmware" : !on ? "Zoom servo off" : "Servo ready ✓")
+    : !on ? "Zoom drive off" : za.homing ? "Homing…"
+      : !za.homed ? "Not homed: homing turns the ring until the endstop" : "Homed ✓";
   $("lw-state").classList.toggle("ok", ready);
   $("lw-on").classList.toggle("hidden", on);
   $("lw-home").disabled = !on || za.homing;
-  $("lw-pos").textContent = za.homed ? fmtPos(za.pos, za.units) : "-";
+  $("lw-pos").textContent = !za.homed ? "-"
+    : fmtPos(za.pos, za.units) + (za.pulse != null ? ` (${za.pulse} µs)` : "");
   $("lw-steps").querySelectorAll("button").forEach((b) => { b.disabled = !ready; });
   $("lw-tele").disabled = $("lw-wide").disabled = !ready;
+  ["lw-mark-min", "lw-mark-max", "lw-slider"].forEach((id) => { $(id).disabled = !ready; });
+  if (lwServo && ready && Date.now() - lwSliding > 800) $("lw-slider").value = za.pos;
 }
 function renderLwMarks() {
   const sorted = [...lwPoints].sort((a, b) => a[1] - b[1]);
-  $("lw-marks").innerHTML = sorted.map((p) => `<span class="chip">${p[1]} mm
+  const fmin = parseFloat($("lw-fmin").value), fmax = parseFloat($("lw-fmax").value);
+  const end = (f) => (f === fmin ? " (wide end)" : f === fmax ? " (tele end)" : "");
+  $("lw-marks").innerHTML = sorted.map((p) => `<span class="chip">${p[1]} mm${lwServo ? end(p[1]) : ""}
       <button class="small ghost" data-f="${p[1]}" title="Remove this mark">×</button></span>`).join("");
   $("lw-marks").querySelectorAll("[data-f]").forEach((b) => {
     b.onclick = () => { lwPoints = lwPoints.filter((p) => p[1] !== parseFloat(b.dataset.f)); renderLwMarks(); };
@@ -777,6 +807,28 @@ $("lw-mark").onclick = () => {
   renderLwMarks();
 };
 $("lw-mark-f").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("lw-mark").click(); } };
+function lwMarkEnd(id) {
+  const f = parseFloat($(id).value), za = status.axes.zoom;
+  if (!(f > 0)) { $("lw-msg").textContent = "Type the min and max focal lengths first"; return; }
+  if (!za || !za.homed) { $("lw-msg").textContent = "Turn the zoom servo on first"; return; }
+  lwPoints = lwPoints.filter((p) => p[1] !== f).concat([[za.pos, f]]);
+  $("lw-msg").textContent = "";
+  renderLwMarks();
+}
+$("lw-mark-min").onclick = () => lwMarkEnd("lw-fmin");
+$("lw-mark-max").onclick = () => lwMarkEnd("lw-fmax");
+$("lw-save").onclick = () => lensSave({});
+$("lw-slider").oninput = () => {        // drag: follow, ~8 moves per second
+  lwSliding = Date.now();
+  if (lwSliding - lwSlideSent < 120) return;
+  lwSlideSent = lwSliding;
+  send({ cmd: "goto", zoom: parseFloat($("lw-slider").value), id: "lws" });
+};
+$("lw-slider").onchange = () => {
+  lwSliding = Date.now();
+  send({ cmd: "goto", zoom: parseFloat($("lw-slider").value), id: "lws" });
+};
+$("lw-fmin").oninput = $("lw-fmax").oninput = () => renderLwMarks();
 $("lw-on").onclick = () => setAxisActive("zoom", true);
 $("lw-home").onclick = () => send({ cmd: "home", axes: ["zoom"], id: "lwh" });
 $("lw-cancel").onclick = () => closeLensWizard(true);

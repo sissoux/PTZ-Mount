@@ -9,7 +9,7 @@ and driver registers at startup.
 | `src/main.c` | Startup, core 0 main loop (link, events, status, watchdog) |
 | `src/comm.c` | UART0 host link, interrupt RX ring buffer, COBS framing |
 | `src/commands.c` | Message decoding and validation, ACKs, queueing to core 1 |
-| `src/stepper.c` | **Core 1**: 40 kHz step ISR + 1 kHz control loop |
+| `src/stepper.c` | **Core 1**: 40 kHz step ISR + 1 kHz control loop, servo PWM outputs |
 | `src/tmc_uart.c` | Raw TMC2209 register read/write on UART1 (GPIO8/9) |
 | `src/cobs.c` | COBS + CRC16 |
 | `src/protocol.h` | Message ids and payload structs (mirror of `host/ptz/protocol.py`) |

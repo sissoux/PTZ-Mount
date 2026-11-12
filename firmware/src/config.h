@@ -30,5 +30,10 @@
 /* Hardware watchdog: reboot if core 1 stops running */
 #define HW_WATCHDOG_MS      200
 
+/* Servo outputs (AXF_SERVO): pulse period and resolution.
+ * PWM counter at 2 MHz: 0.5 us per position step, 40000 counts per 20 ms. */
+#define SERVO_PERIOD_US     20000       /* 50 Hz, standard for every servo */
+#define SERVO_TICKS_PER_US  2
+
 #define CMD_QUEUE_DEPTH     32
 #define EVENT_QUEUE_DEPTH   16

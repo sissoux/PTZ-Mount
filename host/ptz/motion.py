@@ -117,6 +117,13 @@ class MotionController:
         self._refused_log = 0.0
         self.play_speed = 1.0                 # replay speed factor
         self.play_loop = False
+        # servo axes: last position (absolute, set again after a restart so the
+        # servo does not jump), firmware without servo output
+        self._servo_pos: Dict[str, float] = {}
+        self._servo_saved = 0.0
+        self.fw_version: Optional[int] = None
+        self.servo_unsupported: List[str] = []
+        self.mcu_warning = ""
         self._settings_path = os.path.join(cfg.server.state_dir, "settings.json")
         self._load_settings()
         self._level = Level(self.level_pitch, self.level_roll)
@@ -186,6 +193,8 @@ class MotionController:
                     continue
             now = asyncio.get_running_loop().time()
             self.connected = (now - self._last_status) < 1.0
+            if self.ready:
+                self._servo_persist()
             await asyncio.sleep(0.25)
 
     async def _safe(self, coro):
@@ -198,9 +207,20 @@ class MotionController:
     async def _configure(self) -> None:
         c = self.cfg
         pong = await self.link.request("PING", timeout=0.5)
-        if pong["protocol_version"] != P.PROTOCOL_VERSION:
-            raise MotionError(f"firmware protocol v{pong['protocol_version']}, "
-                              f"host expects v{P.PROTOCOL_VERSION}: reflash the MCU")
+        fw = pong["protocol_version"]
+        if not P.MIN_PROTOCOL_VERSION <= fw <= P.PROTOCOL_VERSION:
+            raise MotionError(f"firmware protocol v{fw}, host expects "
+                              f"v{P.MIN_PROTOCOL_VERSION}..v{P.PROTOCOL_VERSION}: reflash the MCU")
+        self.fw_version = fw
+        self.servo_unsupported = [a.name for a in self.axes if a.servo and fw < 2]
+        self.mcu_warning = ""
+        if self.servo_unsupported:
+            self.mcu_warning = (f"the board firmware (protocol v{fw}) has no servo output: "
+                                f"{', '.join(self.servo_unsupported)} unavailable. Reflash the "
+                                "SKR Pico (firmware/flash.sh)")
+            log.warning("%s", self.mcu_warning)
+            for n in self.servo_unsupported:
+                self.axis_active[n] = False
         await self.link.request("RESET")
         await self.link.request("SET_STATUS_RATE", rate_hz=c.mcu.status_rate)
         await self.link.request("SET_WATCHDOG",
@@ -209,7 +229,10 @@ class MotionController:
         # and the tilt must not stay unpowered while the TMC registers are
         # written (the drivers keep their previous register values meanwhile).
         for ax in self.axes:
-            flags = 0
+            if ax.name in self.servo_unsupported:
+                self.state[ax.name].homed = False
+                continue
+            flags = P.AXF_SERVO if ax.servo else 0
             flags |= P.AXF_DIR_INVERT if ax.dir_pin.invert else 0
             flags |= P.AXF_ENABLE_INVERT if ax.enable_pin.invert else 0
             flags |= P.AXF_ENDSTOP_INVERT if ax.endstop_pin.invert else 0
@@ -225,6 +248,8 @@ class MotionController:
                 # the host shapes jog/moves; the MCU follows up to its hard cap
                 vel_accel=ax.max_accel * spu)
             self.state[ax.name].homed = False
+            if ax.servo:
+                await self._servo_init(ax)
         if c.motion.enable_on_start:
             await self.enable(True)
         if c.tmc_uart:
@@ -351,6 +376,26 @@ class MotionController:
         except (OSError, ValueError):
             return
         num = (int, float)
+        # Values in axis units are dropped for an axis whose units changed
+        # (zoom stepper in mm -> servo in %): speeds, limits, lenses.
+        units = data.get("axis_units") or {}
+        changed = {a.name for a in self.axes
+                   if units.get(a.name, None if a.servo else a.units) != a.units}
+        if changed:
+            log.warning("units changed for %s: its saved speed, limits%s are reset",
+                        ", ".join(sorted(changed)), " and lenses" if "zoom" in changed else "")
+            data = dict(data)
+            for key in ("speed_axis", "accel_axis"):
+                data[key] = {n: v for n, v in (data.get(key) or {}).items() if n not in changed}
+            lim = dict(data.get("user_limits") or {})
+            lim["axes"] = {n: v for n, v in (lim.get("axes") or {}).items() if n not in changed}
+            data["user_limits"] = lim
+            if "zoom" in changed:
+                data["lenses"], data["lens"] = {}, None
+        for n, v in (data.get("servo_pos") or {}).items():
+            if n in self.cfg.axes and self.cfg.axes[n].servo and n not in changed \
+                    and isinstance(v, num):
+                self._servo_pos[n] = float(v)
         self.advanced = bool(data.get("advanced", False))
         # settings.json of v0.2 stored 0..1 factors: ignore those
         if isinstance(data.get("speed_all"), num):
@@ -410,7 +455,9 @@ class MotionController:
                 "cars": [{"car": n, "name": c["name"]} for n, c in self.cars.items()],
                 "lenses": self.lenses, "lens": self.lens,
                 "level": {"enabled": self.level_on, "pitch": self.level_pitch,
-                          "roll": self.level_roll, "marks": self.level_marks}}
+                          "roll": self.level_roll, "marks": self.level_marks},
+                "axis_units": {a.name: a.units for a in self.axes},
+                "servo_pos": self._servo_pos}
         try:
             atomic_write_json(self._settings_path, data)
         except OSError as e:
@@ -677,7 +724,29 @@ class MotionController:
         if not 0 < fmin < fmax:
             raise MotionError("min focal must be above 0 and below max focal")
         ax = self.axis("zoom")
+        if wide is None and tele is None and at is None:
+            # ends given as marks at the min and max focal (servo zoom)
+            rest = []
+            for p in points or []:
+                try:
+                    pos, f = float(p[0]), float(p[1])
+                except (TypeError, ValueError, IndexError):
+                    raise MotionError("points must be [zoom position, focal] pairs") from None
+                if abs(f - fmin) < 1e-6:
+                    wide = pos
+                elif abs(f - fmax) < 1e-6:
+                    tele = pos
+                else:
+                    rest.append([pos, f])
+            missing = [f"{f:g} mm" for f, v in ((fmin, wide), (fmax, tele)) if v is None]
+            if missing:
+                raise MotionError(f"mark the zoom position of {' and '.join(missing)} "
+                                  "(the ends of the zoom)")
+            points = rest
         if wide is None or tele is None:
+            if ax.servo:
+                raise MotionError("servo zoom: mark the min and max focal positions "
+                                  "(or give wide and tele)")
             if at not in ("tele", "wide"):
                 raise MotionError("at must be 'tele' or 'wide': the end the lens is at now")
             if not self.state["zoom"].homed:
@@ -821,6 +890,8 @@ class MotionController:
         and the axis must be homed before it moves."""
         ax = self.axis(name)
         on = bool(on)
+        if on and name in self.servo_unsupported:
+            raise MotionError(self.mcu_warning)
         if self.axis_active[name] == on:
             return
         if not on:
@@ -832,14 +903,17 @@ class MotionController:
             if self.ready:
                 await self.link.request("STOP", axis_mask=1 << ax.index)
                 await self.link.request("ENABLE", axis_mask=1 << ax.index, enable_mask=0)
-            self.state[name].homed = False
+            if not ax.servo:
+                self.state[name].homed = False
         else:
             self.axis_active[name] = True
-            self.state[name].homed = False
+            if not ax.servo:
+                self.state[name].homed = False
             if self.ready and self.cfg.motion.enable_on_start:
                 await self.enable(True, [name])
         self._save_settings()
-        log.info("axis %s %s", name, "enabled: home it before use" if on else "disabled")
+        log.info("axis %s %s", name, ("enabled" if ax.servo else "enabled: home it before use")
+                 if on else "disabled")
 
     # ================================================================ blocking mode
     def lock(self, client: str, label: str) -> None:
@@ -1157,7 +1231,7 @@ class MotionController:
                 pos[n], vel[n] = sample[n][0], self._cmd_vel[n]
             else:
                 pos[n] = self.position(n)
-                vel[n] = self.cfg.axes[n].to_units(self.state[n].vel)
+                vel[n] = self.state[n].vel / self.cfg.axes[n].steps_per_unit
         return pos, vel
 
     def _cancel_motion(self, handover: bool = False) -> None:
@@ -1257,10 +1331,19 @@ class MotionController:
             prev["task"].cancel()
         start = prev["target"] if prev is not None else st.pos
         target = start + steps
-        if st.homed:
-            log.info("%s: raw move, homing lost (home it again before use)", name)
-        st.homed = False
-        await self.link.request("SET_LIMITS", axis=ax.index, min=0, max=0, enabled=0)
+        if ax.servo:
+            # never outside the configured pulse range (the servo would force)
+            lo, hi = sorted((ax.to_steps(ax.position_min), ax.to_steps(ax.position_max)))
+            target = int(clamp(target, lo, hi))
+            if target == st.pos:
+                raise MotionError(f"{name} is at the end of its pulse range "
+                                  f"({ax.pulse_min:g}..{ax.pulse_max:g} us)")
+            await self.link.request("SET_LIMITS", axis=ax.index, min=lo, max=hi, enabled=1)
+        else:
+            if st.homed:
+                log.info("%s: raw move, homing lost (home it again before use)", name)
+            st.homed = False
+            await self.link.request("SET_LIMITS", axis=ax.index, min=0, max=0, enabled=0)
         fut = self._expect(ax.index, P.EV_MOVE_DONE, P.EV_ENDSTOP_HIT)
         await self.link.request("MOVE_TO", axis=ax.index, target=target, max_vel=v, accel=a)
         timeout = abs(target - st.pos) / v + 2.0 * v / a + 3.0
@@ -1381,7 +1464,8 @@ class MotionController:
         for n in names:
             mask |= 1 << self.axis(n).index
             if not on:
-                self.state[n].homed = False     # may move freely while unpowered
+                if not self.cfg.axes[n].servo:  # a servo stays absolute
+                    self.state[n].homed = False     # may move freely while unpowered
                 self._cancel_jog([n])
                 self._cancel_raw([n])
         await self.link.request("ENABLE", axis_mask=mask, enable_mask=mask if on else 0)
@@ -1497,6 +1581,11 @@ class MotionController:
     async def _home_axis(self, ax: AxisConfig) -> Optional[float]:
         """Home one axis. Returns where it should park (or None)."""
         st = self.state[ax.name]
+        if ax.servo:                     # absolute: always "homed", never moves here
+            if ax.name in self.servo_unsupported:
+                raise MotionError(self.mcu_warning)
+            st.homed = True
+            return None
         if ax.name in self._homing:
             raise MotionError(f"axis '{ax.name}' already homing")
         self._homing.add(ax.name)
@@ -1531,6 +1620,44 @@ class MotionController:
         if target is None and not lo <= ax.position_endstop <= hi:
             target = ax.position_endstop
         return None if target is None else clamp(target, lo, hi)
+
+    # ================================================================ servo axes
+    def _servo_start(self, ax: AxisConfig) -> float:
+        """Where a servo axis is commanded after (re)configuration: its last
+        position (no jump), else park_position, else the middle."""
+        p = self._servo_pos.get(ax.name)
+        if p is None:
+            p = ax.park_position
+        if p is None:
+            p = (ax.position_min + ax.position_max) / 2
+        return clamp(p, ax.position_min, ax.position_max)
+
+    async def _servo_init(self, ax: AxisConfig) -> None:
+        """A servo is absolute (its own position loop): no homing. The MCU
+        position is set before the output is enabled."""
+        await self._set_position(ax, self._servo_start(ax))
+        self.state[ax.name].homed = True
+        lo, hi = self.limits_of(ax.name)
+        await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
+                                max=ax.to_steps(hi), enabled=1)
+
+    def _servo_persist(self) -> None:
+        """Remember where each servo rests (settings.json, at most every 2 s)."""
+        now = time.monotonic()
+        if now - self._servo_saved < 2.0:
+            return
+        changed = False
+        for ax in self.axes:
+            st = self.state[ax.name]
+            if not ax.servo or not st.homed or st.flags & P.ST_MOVING:
+                continue
+            p = round(self.position(ax.name), 2)
+            if abs(p - self._servo_pos.get(ax.name, math.inf)) >= 0.05:
+                self._servo_pos[ax.name] = p
+                changed = True
+        if changed:
+            self._servo_saved = now
+            self._save_settings()
 
     async def _set_position(self, ax: AxisConfig, units: float) -> None:
         steps = ax.to_steps(units)
@@ -2082,13 +2209,16 @@ class MotionController:
             f = st.flags
             axes[ax.name] = {
                 "pos": round(ax.to_units(st.pos), 4),
-                "vel": round(ax.to_units(st.vel), 4),
+                "vel": round(st.vel / ax.steps_per_unit, 4),
                 "homed": st.homed,
                 "homing": ax.name in self._homing,
                 "steps": st.pos,
                 "raw": ({k: v for k, v in self._raw[ax.name].items() if k != "task"}
                         if ax.name in self._raw else None),
                 "halted": bool(f & P.ST_HALTED),
+                "servo": ax.servo,
+                "pulse": round(st.pos / P.SERVO_TICKS_PER_US, 1) if ax.servo else None,
+                "available": ax.name not in self.servo_unsupported,
                 "enabled": bool(f & P.ST_ENABLED),
                 "moving": bool(f & P.ST_MOVING),
                 "endstop": bool(f & P.ST_ENDSTOP),
@@ -2126,5 +2256,7 @@ class MotionController:
                          if self._traj_kind == "tracking" and self._traj is not None else None},
             "error": self.last_error,
             "config_error": getattr(self, "config_error", ""),
+            "mcu_warning": self.mcu_warning,
+            "firmware": self.fw_version,
             "axes": axes,
         }

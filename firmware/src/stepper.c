@@ -14,6 +14,10 @@
  *   position mode : v_target = sign(err) * min(vmax, sqrt(2 * 0.9 * a * |err|))
  *   homing        : constant velocity until the ISR sees the endstop
  *   soft limits   : v_target clamped so the axis can always brake in time
+ *
+ * Servo axes (AXF_SERVO): same control and ISR, but the ISR only counts
+ * (no step pin); the counted position is the pulse width of a hardware PWM
+ * output (1 / SERVO_TICKS_PER_US us per step), updated every control tick.
  */
 #include "stepper.h"
 
@@ -22,7 +26,9 @@
 #include <string.h>
 
 #include "config.h"
+#include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "hardware/pwm.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
@@ -43,6 +49,8 @@ typedef struct {
     int8_t   endstop_dir;
     uint32_t step_mask;
     float    max_vel, max_accel, vel_accel;
+    bool     servo;                 /* step_pin is a servo PWM output */
+    uint     servo_slice, servo_chan;
 
     /* shared with the ISR */
     volatile int32_t  pos;
@@ -131,7 +139,8 @@ static bool __not_in_flash_func(step_isr)(repeating_timer_t *rt)
         int8_t dir = a->dir;
         if (dir != a->dir_state) {          /* dir setup time: one full tick */
             a->dir_state = dir;
-            gpio_put(a->dir_pin, (dir > 0) ^ a->dir_inv);
+            if (a->dir_pin != PIN_NONE)
+                gpio_put(a->dir_pin, (dir > 0) ^ a->dir_inv);
             continue;
         }
         if (a->guard_dir != 0 && dir == a->guard_dir && a->endstop_pin != PIN_NONE) {
@@ -186,6 +195,19 @@ static void apply_velocity(axis_t *a)
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+/* Servo pulse = position (the PWM latches it at the end of the period: no
+ * glitch). Disabled, or position <= 0: no pulse, the servo is released. */
+static void servo_output(axis_t *a)
+{
+    const int32_t wrap = SERVO_PERIOD_US * SERVO_TICKS_PER_US - 1;
+    int32_t level = a->enabled ? a->pos : 0;
+    if (level < 0)
+        level = 0;
+    if (level > wrap / 2)                   /* never above a 50 % duty cycle */
+        level = wrap / 2;
+    pwm_set_chan_level(a->servo_slice, a->servo_chan, (uint16_t)level);
+}
+
 static void set_enable(axis_t *a, bool on)
 {
     a->enabled = on;
@@ -196,6 +218,8 @@ static void set_enable(axis_t *a, bool on)
         a->v = a->v_cmd = 0.0f;
         apply_velocity(a);
     }
+    if (a->servo)
+        servo_output(a);
 }
 
 static void feed_watchdog(void)
@@ -216,17 +240,33 @@ static void configure_axis(axis_t *a, const msg_config_axis_t *c)
     a->en_inv = c->flags & AXF_ENABLE_INVERT;
     a->es_inv = c->flags & AXF_ENDSTOP_INVERT;
     a->endstop_dir = c->endstop_dir;
-    a->step_mask = 1u << c->step_pin;
+    a->servo = c->flags & AXF_SERVO;
+    a->step_mask = a->servo ? 0 : 1u << c->step_pin;   /* servo: count, no pulse pin */
     a->max_vel = clampf(c->max_vel, 1.0f, MAX_STEP_RATE);
     a->max_accel = c->max_accel > 0 ? c->max_accel : 1.0f;
     a->vel_accel = (c->vel_accel > 0 && c->vel_accel <= a->max_accel) ? c->vel_accel : a->max_accel;
 
-    gpio_init(a->step_pin);
-    gpio_set_dir(a->step_pin, GPIO_OUT);
-    gpio_put(a->step_pin, 0);
-    gpio_init(a->dir_pin);
-    gpio_set_dir(a->dir_pin, GPIO_OUT);
-    gpio_put(a->dir_pin, a->dir_inv);
+    if (a->servo) {
+        /* PWM at SERVO_TICKS_PER_US MHz, one period = SERVO_PERIOD_US, level 0 */
+        a->servo_slice = pwm_gpio_to_slice_num(a->step_pin);
+        a->servo_chan = pwm_gpio_to_channel(a->step_pin);
+        pwm_config pc = pwm_get_default_config();
+        pwm_config_set_clkdiv(&pc, (float)clock_get_hz(clk_sys) / (SERVO_TICKS_PER_US * 1000000.0f));
+        pwm_config_set_wrap(&pc, SERVO_PERIOD_US * SERVO_TICKS_PER_US - 1);
+        pwm_init(a->servo_slice, &pc, false);
+        pwm_set_chan_level(a->servo_slice, a->servo_chan, 0);
+        gpio_set_function(a->step_pin, GPIO_FUNC_PWM);
+        pwm_set_enabled(a->servo_slice, true);
+    } else {
+        gpio_init(a->step_pin);
+        gpio_set_dir(a->step_pin, GPIO_OUT);
+        gpio_put(a->step_pin, 0);
+    }
+    if (a->dir_pin != PIN_NONE) {
+        gpio_init(a->dir_pin);
+        gpio_set_dir(a->dir_pin, GPIO_OUT);
+        gpio_put(a->dir_pin, a->dir_inv);
+    }
     if (a->enable_pin != PIN_NONE) {
         gpio_init(a->enable_pin);
         gpio_set_dir(a->enable_pin, GPIO_OUT);
@@ -260,6 +300,12 @@ static void reset_all(void)
         if (a->configured) {
             set_enable(a, false);
             a->configured = false;
+            if (a->servo) {
+                pwm_set_enabled(a->servo_slice, false);
+                gpio_init(a->step_pin);
+                gpio_set_dir(a->step_pin, GPIO_OUT);
+                gpio_put(a->step_pin, 0);
+            }
         }
     }
     __dmb();
@@ -521,8 +567,11 @@ void stepper_core1_main(void)
         for (int n = 0; n < 16 && queue_try_remove(&cmd_queue, &c); n++)
             process_cmd(&c);
         check_watchdog();
-        for (uint8_t i = 0; i < MAX_AXES; i++)
+        for (uint8_t i = 0; i < MAX_AXES; i++) {
             control_axis(i, &axes[i], dt);
+            if (axes[i].configured && axes[i].servo)
+                servo_output(&axes[i]);
+        }
         publish_status();
         heartbeat++;
         busy_wait_until(next);

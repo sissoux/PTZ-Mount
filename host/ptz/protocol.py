@@ -8,7 +8,10 @@ import struct
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+#: Oldest firmware the host still drives (v1: no servo output, the servo
+#: axes are then left unconfigured and reported, the other axes work).
+MIN_PROTOCOL_VERSION = 1
 MAX_AXES = 4
 PIN_NONE = 0xFF
 MAX_RAW = 64
@@ -19,6 +22,11 @@ AXF_DIR_INVERT = 1 << 0
 AXF_ENABLE_INVERT = 1 << 1
 AXF_ENDSTOP_INVERT = 1 << 2
 AXF_ENDSTOP_PULLUP = 1 << 3
+AXF_SERVO = 1 << 4          # v2: step_pin is a hobby-servo PWM output
+
+# Servo outputs (firmware/src/config.h): position steps per us of pulse
+SERVO_TICKS_PER_US = 2
+SERVO_PERIOD_US = 20000
 
 # ACK status
 ACK_OK = 0

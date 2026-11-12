@@ -194,6 +194,8 @@ abridged:
 | `axes.<n>.steps` | Position in microsteps, as counted by the board |
 | `axes.<n>.raw` | The `raw_move` running on this axis (`null`: none): `start`, `target` (microsteps), `speed`, `accel` |
 | `axes.<n>.halted` | Stopped by its endstop (endstop guard): it only moves away from the switch |
+| `axes.<n>.servo` / `pulse` / `available` | Servo axis (`servo_pin` in the config): no endstop, always homed; `pulse`: current pulse width (us); `available`: false when the board firmware has no servo output (reflash) |
+| `mcu_warning` | Board firmware problem the operator must fix (e.g. `"... has no servo output: zoom unavailable. Reflash the SKR Pico ..."`), `""` otherwise. `firmware`: its protocol version. |
 | `settings` | Motion settings, see `set_motion`. `effective_*` are the values actually applied per axis, after the per-axis maxima. |
 | `limits` | Learned soft limits (5.9). `axes.<n>.min` / `max` are `null` when not set. `effective` is the travel actually allowed: the configured travel, narrowed by the learned limits when `enabled`. |
 | `lens` | Zoom lenses (5.12). `current`: the lens fitted (`null`: none). `sign`: +1 when the motor's positive direction zooms in, -1 when it zooms out. `focal`: current focal length in mm (`null` without a lens or before homing). `tilt_adjust`: finding the lens's max tilt (tilt soft limits off). `tilt_range`: the configured tilt travel. Per lens: focal range, the zoom positions of its `wide` and `tele` ends, its focal `points` ([zoom position, focal]) and its `tilt_max` (`null`: soft limits). |
@@ -231,7 +233,7 @@ are accepted from everyone, even when another client holds the lock
 | `home` | `axes` (list, optional); `wait` | Homes the axes. By default: every active axis with `home_with_all`. Ends with one combined move to the park positions (0 by default). |
 | `enable` | `on` (bool); `axes` (optional) | Powers the drivers on or off. Off releases the motors and **clears homing**. |
 | `axis_active` | `axis`, `on` | Switches an axis on or off live (section 2). Switching on requires homing it. The setting is remembered. |
-| `raw_move` | `axis`, `steps` (microsteps, signed), `speed` (microsteps/s), `accel` (optional, microsteps/s²), `wait` | Wiring check (the **/debug** page): turns the axis by a number of microsteps **without homing, soft limits or travel limits**. The axis loses its homing. Speed and acceleration are capped by the axis's `max_velocity` / `max_accel`. The endstop still halts it when the switch is at the end of the travel (`endstop_guard`), moving toward the homing side; a move further toward the switch is then refused. A move sent while one runs adds to its target. `stop` ends it. The axis must be on and its driver powered. Reply: `raw` (`target`, `speed`, `capped`, and with `wait` the `result`: `"done"`, `"endstop"`, `"stopped"` or `"timeout"`) |
+| `raw_move` | `axis`, `steps` (microsteps, signed), `speed` (microsteps/s), `accel` (optional, microsteps/s²), `wait` | Wiring check (the **/debug** page): turns the axis by a number of microsteps **without homing, soft limits or travel limits**. On a servo axis a step is 0.5 us of pulse, the move stays within the configured pulse range and the axis stays homed. The axis loses its homing. Speed and acceleration are capped by the axis's `max_velocity` / `max_accel`. The endstop still halts it when the switch is at the end of the travel (`endstop_guard`), moving toward the homing side; a move further toward the switch is then refused. A move sent while one runs adds to its target. `stop` ends it. The axis must be on and its driver powered. Reply: `raw` (`target`, `speed`, `capped`, and with `wait` the `result`: `"done"`, `"endstop"`, `"stopped"` or `"timeout"`) |
 
 Examples:
 
@@ -501,9 +503,9 @@ roll of the picture itself: only the aim is corrected.
 
 ### 5.12 Zoom lenses
 
-The zoom drive turns the lens's zoom ring through a gear. Homing turns the
-ring until the endstop, so the endstop side is one end of the ring. Lenses
-do not all turn the same way: on some the endstop side is wide, on others
+The zoom drive turns the lens's zoom ring through a gear: a hobby servo
+(`servo_pin`, the default) or a stepper with an endstop. Lenses do not all
+turn the same way: on some the low end of the zoom axis is wide, on others
 it is tele. A lens profile stores which zoom position is wide and which is
 tele, so that:
 
@@ -524,7 +526,7 @@ tele, so that:
 
 | Command | Parameters | Effect |
 |---|---|---|
-| `lens_save` | `name`, `focal_min`, `focal_max` (mm), `at`, `points` (optional), `rename_from` (optional) | Learning. The zoom was homed (the ring at the endstop end) and moved to the other end of the ring (`move_rel`, the web wizard's steps, or jog). `at`: the end it is at now, `"tele"` (zoomed in) or `"wide"`. The other end is the endstop position. Stores the lens and selects it (same name: replaced). Instead of `at`, `wide` and `tele` positions can be given directly. `points`: focal marks `[[zoom position, focal], ...]` taken on the way (the focal printed on the barrel), strictly between the ends and in order along the ring. A lens learned again keeps its max tilt; `rename_from`: the old name of a lens being renamed. Reply: `lens` |
+| `lens_save` | `name`, `focal_min`, `focal_max` (mm), `at`, `points` (optional), `rename_from` (optional). Servo zoom: no `at`, `points` include the marks at `focal_min` and `focal_max` (the ends) | Learning. The zoom was homed (the ring at the endstop end) and moved to the other end of the ring (`move_rel`, the web wizard's steps, or jog). `at`: the end it is at now, `"tele"` (zoomed in) or `"wide"`. The other end is the endstop position. Stores the lens and selects it (same name: replaced). Instead of `at`, `wide` and `tele` positions can be given directly. `points`: focal marks `[[zoom position, focal], ...]` taken on the way (the focal printed on the barrel), strictly between the ends and in order along the ring. A lens learned again keeps its max tilt; `rename_from`: the old name of a lens being renamed. Reply: `lens` |
 | `lens_select` | `name` (`null` or `""`: none) | The lens fitted. Without a lens: motor direction and the configured travel. |
 | `lens_delete` | `name` | Forgets a lens |
 | `lenses` | - | Reply: `lens` (as in the status) |
@@ -533,8 +535,24 @@ tele, so that:
 | `lens_tilt_max` | `value` (optional, default: the current tilt), `clear` (bool) | Max tilt with the lens selected, never past the configured travel; ends the adjust. `clear`: none, the soft limits apply. Reply: `tilt_max` |
 
 Before learning, select no lens: a lens's range would stop the zoom at its
-ends. The configured `position_max` of the zoom axis must cover the longest
-ring travel.
+ends. The configured travel of the zoom axis must cover the longest ring
+travel.
+
+**Servo zoom** (no endstop, no homing): move the zoom anywhere (`goto`,
+`move_rel`, jog) and mark each focal length printed on the barrel. The marks
+at `focal_min` and `focal_max` are the two ends of the zoom (`lens_save`
+without `at`, `wide`, `tele`):
+
+```json
+{"cmd": "lens_select", "name": null}
+{"cmd": "goto", "zoom": 22, "wait": true}
+{"cmd": "goto", "zoom": 88, "wait": true}
+{"cmd": "lens_save", "name": "Kit 18-135", "focal_min": 18, "focal_max": 135,
+ "points": [[22, 18], [40, 35], [52, 50], [70, 85], [88, 135]]}
+```
+
+**Stepper zoom with an endstop**: homing turns the ring until the endstop,
+that end is one end of the ring; step to the other end and say which it is:
 
 ```json
 {"cmd": "lens_select", "name": null}

@@ -81,7 +81,9 @@ void commands_handle(uint8_t id, uint8_t seq, const uint8_t *p, size_t len)
     }
     case MSG_CONFIG_AXIS: {
         DECODE(msg_config_axis_t, m);
-        bool pins_ok = m.step_pin <= 29 && m.dir_pin <= 29 && m.step_pin != m.dir_pin
+        bool servo = m.flags & AXF_SERVO;
+        bool pins_ok = m.step_pin <= 29 && m.step_pin != m.dir_pin
+                    && (m.dir_pin <= 29 || (servo && m.dir_pin == PIN_NONE))
                     && (m.enable_pin <= 29 || m.enable_pin == PIN_NONE)
                     && (m.endstop_pin <= 29 || m.endstop_pin == PIN_NONE)
                     && m.step_pin != HOST_UART_TX_PIN && m.step_pin != HOST_UART_RX_PIN;

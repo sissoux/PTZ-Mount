@@ -29,6 +29,8 @@ target_link_libraries(ptz_firmware
     pico_multicore
     hardware_uart
     hardware_gpio
+    hardware_pwm
+    hardware_clocks
     hardware_sync
     hardware_watchdog
 )

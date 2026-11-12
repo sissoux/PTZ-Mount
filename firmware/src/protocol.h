@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 
-#define PROTOCOL_VERSION 1
+#define PROTOCOL_VERSION 2      /* v2: AXF_SERVO */
 #define MAX_AXES         4
 #define PIN_NONE         0xFF
 #define MAX_RAW          64
@@ -53,6 +53,11 @@ enum {
 #define AXF_ENABLE_INVERT   (1u << 1)
 #define AXF_ENDSTOP_INVERT  (1u << 2)
 #define AXF_ENDSTOP_PULLUP  (1u << 3)
+/* Servo output (v2): step_pin carries a hobby-servo pulse (hardware PWM),
+ * dir_pin may be PIN_NONE. The position counts pulse width in
+ * 1 / SERVO_TICKS_PER_US us (absolute: 0 = no pulse), moved by the same
+ * velocity / position / limit control as a stepper. Disabled: no pulse. */
+#define AXF_SERVO           (1u << 4)
 
 /* STATUS.sys_flags */
 #define SYS_ESTOP      (1u << 0)

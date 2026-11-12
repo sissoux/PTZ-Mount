@@ -59,7 +59,19 @@ All conversion to user units (degrees, %, mm...) happens on the host.
 | 0x28 | CLEAR_ESTOP      | -                                    | ACK        |
 
 `CONFIG_AXIS.flags`: bit0 dir_invert, bit1 enable_invert, bit2 endstop_invert,
-bit3 endstop_pullup.
+bit3 endstop_pullup, bit4 servo (protocol v2).
+
+**Servo axis** (bit4, v2): `step_pin` is a hobby-servo output (RP2040 hardware
+PWM, 50 Hz, `SERVO_PERIOD_US` in `firmware/src/config.h`); `dir_pin` may be
+`0xFF`. The axis runs the same velocity / position / limit control as a
+stepper, but its position is the **pulse width in 0.5 us steps**
+(`SERVO_TICKS_PER_US` = 2), absolute: 0 = no pulse. The output is updated
+every control tick and latched by the PWM at the end of a period (no
+glitch). `ENABLE` off: no pulse (the servo is released). The pulse never
+exceeds half the period. After `RESET` or `CONFIG_AXIS` the position is 0:
+the host sends `SET_POSITION` (the last pulse width) before `ENABLE`. A v1
+firmware refuses the flag (`ACK` bad argument); the host then leaves servo
+axes unconfigured and drives the others (v1 still accepted).
 
 `CONFIG_AXIS.vel_accel`: acceleration used in velocity (jog) mode. `max_accel`
 is the hard limit used by `MOVE_TO` (clamped), `STOP` and the watchdog stop.

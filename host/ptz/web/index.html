@@ -401,26 +401,32 @@
         <label>Min focal <input id="lw-fmin" type="number" min="1" step="1" class="short"> mm</label>
         <label>Max focal <input id="lw-fmax" type="number" min="1" step="1" class="short"> mm</label>
       </div>
-      <h3>1 · Zoom at the endstop</h3>
+      <h3 id="lw-h1">1 · Zoom at the endstop</h3>
       <div class="row">
         <span id="lw-state" class="lw-state"></span>
         <button id="lw-on" class="small">Turn zoom on</button>
         <button id="lw-home" class="small">Home zoom</button>
       </div>
-      <h3>2 · Turn the ring to its other end</h3>
-      <div class="lw-pos">Zoom position: <b id="lw-pos">-</b> <span class="muted">from the endstop</span></div>
+      <h3 id="lw-h2">2 · Turn the ring to its other end</h3>
+      <div class="lw-pos">Zoom position: <b id="lw-pos">-</b> <span id="lw-pos-note" class="muted">from the endstop</span></div>
       <div id="lw-steps" class="lw-steps"></div>
+      <input id="lw-slider" type="range" class="lw-slider hidden" title="Zoom position (servo)">
       <div class="lw-marks">
-        <span class="muted">Focal marks (optional): at each focal printed on the barrel,</span>
+        <span id="lw-marks-label" class="muted">Focal marks (optional): at each focal printed on the barrel,</span>
         <input id="lw-mark-f" type="number" min="1" step="any" placeholder="mm" class="short">
         <button id="lw-mark" class="small" title="The ring is at this focal length now">Mark here</button>
         <div id="lw-marks" class="lw-chips"></div>
       </div>
-      <p class="hint">Move away from the endstop step by step until the ring reaches its other
+      <p id="lw-hint" class="hint">Move away from the endstop step by step until the ring reaches its other
         end; stop just before the motor forces. The zoom rocker also works (motor direction
         while learning).</p>
-      <h3>3 · Which end is it?</h3>
-      <div class="row lw-ends">
+      <h3 id="lw-h3">3 · Which end is it?</h3>
+      <div id="lw-servo-ends" class="row lw-ends hidden">
+        <button id="lw-mark-min" title="The zoom is at its widest: the min focal">Wide end here (min focal)</button>
+        <button id="lw-mark-max" title="The zoom is at its longest: the max focal">Tele end here (max focal)</button>
+        <button id="lw-save" class="primary" title="Save the lens with these marks">Save the lens</button>
+      </div>
+      <div id="lw-stepper-ends" class="row lw-ends">
         <button id="lw-tele" title="The picture is zoomed in: max focal">Zoomed in (tele, max focal)</button>
         <button id="lw-wide" title="The picture is zoomed out: min focal">Zoomed out (wide, min focal)</button>
       </div>

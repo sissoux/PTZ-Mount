@@ -35,7 +35,10 @@ def test_load_default_config():
     assert cfg.tmc_uart.tx_pin.gpio == 8
     # switches inside the travel range -> no guard; zoom switch at min -> guard
     assert not pan.endstop_guard and not cfg.axes["tilt"].endstop_guard
-    assert cfg.axes["zoom"].endstop_guard
+    # zoom: hobby servo on the SERVOS header (gpio29), no endstop / homing
+    z = cfg.axes["zoom"]
+    assert z.servo and z.step_pin.gpio == 29 and not z.has_endstop and z.tmc is None
+    assert not z.endstop_guard and (z.pulse_min, z.pulse_max) == (1000, 2000)
     # zoom drive not always fitted: off by default; axes park at 0 after homing
     assert cfg.axes["zoom"].active is False and pan.active is True
     assert pan.park_position == 0 and cfg.axes["tilt"].park_position == 0
@@ -56,6 +59,8 @@ def test_compatible_with_previous_klipper_config():
     new.read(CONFIG_PATH, encoding="utf-8")
     cfg = C.load(CONFIG_PATH)
     for ksec, axis in KLIPPER_MAP.items():
+        if axis == "zoom":       # the Klipper Z stepper became a servo (2026-11)
+            continue
         k, n = old[ksec], new[f"axis {axis}"]
         for key in ("step_pin", "dir_pin", "enable_pin", "endstop_pin", "microsteps"):
             if key in k:

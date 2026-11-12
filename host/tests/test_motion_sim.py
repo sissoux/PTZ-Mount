@@ -65,14 +65,15 @@ max_accel: 4000
 """
 
 
-def run(coro_fn, tmp_path, cfg_text=None):
+def run(coro_fn, tmp_path, cfg_text=None, fw=None):
     async def main():
         p = tmp_path / "t.cfg"
         text = cfg_text if cfg_text is not None else FAST_CFG
         p.write_text(text.format(state=str(tmp_path).replace("\\", "/")))
         cfg = C.load(str(p))
         assert cfg.warnings == []
-        ctrl = MotionController(cfg, McuLink(SimTransport()))
+        ctrl = MotionController(cfg, McuLink(SimTransport() if fw is None
+                                             else SimTransport(protocol_version=fw)))
         await ctrl.start()
         for _ in range(100):
             if ctrl.ready and ctrl.connected:
@@ -1163,3 +1164,117 @@ def test_raw_move_wiring_check(tmp_path):
                                     "speed": 4000, "wait": True})
         assert rep["ok"] and rep["raw"]["result"] == "done"
     run(t, tmp_path)
+
+
+SERVO_CFG = FAST_CFG.split("[axis zoom]")[0] + """[axis zoom]
+servo_pin: gpio29
+minimum_pulse_width: 0.001
+maximum_pulse_width: 2000
+position_min: 0
+position_max: 100
+max_velocity: 200
+max_accel: 2000
+"""
+
+
+def test_servo_config(tmp_path):
+    p = tmp_path / "s.cfg"
+    p.write_text(SERVO_CFG.format(state=str(tmp_path).replace("\\", "/")))
+    cfg = C.load(str(p))
+    assert cfg.warnings == []
+    z = cfg.axes["zoom"]
+    assert z.servo and z.units == "%" and not z.has_endstop
+    assert (z.pulse_min, z.pulse_max) == (1000, 2000)
+    assert z.to_steps(0) == 2000 and z.to_steps(100) == 4000      # 0.5 us steps
+    assert z.pulse_us(50) == 1500 and z.to_units(3000) == 50
+    bad = SERVO_CFG + "[tmc2209 zoom]\nuart_address: 1\nrun_current: 0.5\n"
+    p.write_text(bad.format(state="x"))
+    with pytest.raises(C.ConfigError, match="servo"):
+        C.load(str(p))
+    p.write_text(SERVO_CFG.replace("0.001", "50").format(state="x"))
+    with pytest.raises(C.ConfigError, match="100..3000"):
+        C.load(str(p))
+
+
+def test_servo_zoom_absolute_no_homing(tmp_path):
+    async def t(ctrl):
+        z = ctrl.state["zoom"]
+        steps = {n: ctrl.state[n].pos for n in ("pan", "tilt")}
+        st = ctrl.status()["axes"]["zoom"]
+        # usable at once, at the middle of its range (nothing saved yet), no move
+        assert z.homed and st["servo"] and st["pulse"] == 1500
+        assert not ctrl.state["pan"].homed and not ctrl.state["tilt"].homed
+        assert ctrl.jog({"pan": 1.0}) == ["pan"]            # the head still needs homing
+        ctrl.jog({"pan": 0.0})
+        await ctrl.goto({"zoom": 80}, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.position("zoom") == pytest.approx(80, abs=0.05)
+        assert ctrl.status()["axes"]["zoom"]["pulse"] == pytest.approx(1800, abs=0.5)
+        await ctrl.home(["zoom"])                           # nothing to do, no move
+        assert ctrl.position("zoom") == pytest.approx(80, abs=0.05)
+        # never outside the pulse range
+        await ctrl.goto({"zoom": 150}, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.position("zoom") == pytest.approx(100, abs=0.05)
+        r = await ctrl.raw_move("zoom", -100000, 4000, wait=True)
+        assert r["target"] == 2000 and r["result"] == "done"     # 1000 us, no further
+        assert ctrl.state["zoom"].homed
+        # output off and on: still absolute
+        await ctrl.set_axis_active("zoom", False)
+        await ctrl.set_axis_active("zoom", True)
+        assert z.homed
+        await ctrl.goto({"zoom": 30}, wait=True)
+        await asyncio.sleep(2.5)                            # remembered (every 2 s)
+        assert {n: ctrl.state[n].pos for n in ("pan", "tilt")} == steps   # head never moved
+    run(t, tmp_path, SERVO_CFG)
+    saved = json.loads((tmp_path / "settings.json").read_text())
+    assert saved["servo_pos"]["zoom"] == pytest.approx(30, abs=0.05)
+    assert saved["axis_units"]["zoom"] == "%"
+
+    async def t2(ctrl):                                     # after a restart: same place
+        assert ctrl.state["zoom"].homed
+        assert ctrl.position("zoom") == pytest.approx(30, abs=0.05)
+    run(t2, tmp_path, SERVO_CFG)
+
+
+def test_servo_on_old_firmware(tmp_path):
+    async def t(ctrl):
+        assert ctrl.servo_unsupported == ["zoom"]
+        st = ctrl.status()
+        assert "Reflash" in st["mcu_warning"] and not st["axes"]["zoom"]["available"]
+        assert not ctrl.axis_active["zoom"]
+        with pytest.raises(MotionError, match="servo"):
+            await ctrl.set_axis_active("zoom", True)
+        await ctrl.home(["pan"])                            # the rest works
+        assert ctrl.state["pan"].homed
+    run(t, tmp_path, SERVO_CFG, fw=1)
+
+
+def test_servo_settings_migration_and_lens_marks(tmp_path):
+    # settings saved with the zoom stepper (mm): its speed, limits, lenses go
+    (tmp_path / "settings.json").write_text(json.dumps({
+        "advanced": True, "speed_axis": {"pan": 65.0, "zoom": 5.0},
+        "accel_axis": {"pan": 100.0, "zoom": 10.0},
+        "user_limits": {"enabled": False, "axes": {"pan": {"min": -40, "max": 60},
+                                                    "zoom": {"min": 3, "max": None}}},
+        "lenses": {"Old": {"focal_min": 18, "focal_max": 135, "wide": 0, "tele": 80}},
+        "lens": "Old"}))
+
+    async def t(ctrl):
+        assert ctrl.speed_axis["zoom"] == 200 and ctrl.speed_axis["pan"] == 65
+        assert ctrl.user_limits["pan"]["min"] == -40 and ctrl.user_limits["zoom"]["min"] is None
+        assert ctrl.lenses == {} and ctrl.lens is None
+        # servo zoom: the ends are the min and max focal marks
+        with pytest.raises(MotionError, match="135 mm"):
+            await ctrl.lens_save("Kit", 18, 135, points=[[20, 18], [50, 50]])
+        with pytest.raises(MotionError, match="mark the min and max"):
+            await ctrl.lens_save("Kit", 18, 135, at="tele")
+        lens = await ctrl.lens_save("Kit", 18, 135, points=[[80, 18], [60, 35], [45, 50],
+                                                             [10, 135], [30, 85]])
+        assert (lens["wide"], lens["tele"]) == (80, 10)
+        assert lens["points"] == [[60, 35], [45, 50], [30, 85]]
+        assert ctrl.zoom_sign() < 0
+        await ctrl.zoom_to_focal(50, wait=True)
+        await asyncio.sleep(0.05)
+        assert ctrl.position("zoom") == pytest.approx(45, abs=0.1)
+    run(t, tmp_path, SERVO_CFG)

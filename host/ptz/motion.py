@@ -635,8 +635,14 @@ class MotionController:
             if not self.state[name].homed or name in self._homing:
                 continue
             lo, hi = self.limits_of(name)
-            await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
-                                    max=ax.to_steps(hi), enabled=1)
+            await self._send_limits(ax, lo, hi)
+
+    async def _send_limits(self, ax: AxisConfig, lo: float, hi: float) -> None:
+        """SET_LIMITS in steps. The MCU needs max > min: a pinned axis
+        (servo zoom with no lens: lo == hi) gets a one-step window."""
+        a = ax.to_steps(lo)
+        await self.link.request("SET_LIMITS", axis=ax.index, min=a,
+                                max=max(ax.to_steps(hi), a + 1), enabled=1)
 
     async def set_user_limit(self, name: str, side: str, value: Optional[float] = None) -> float:
         """Learn one soft limit; value defaults to the current position."""
@@ -1759,8 +1765,7 @@ class MotionController:
                 await self._home_approach(ax, d * ax.second_homing_speed * spu, retract * 3)
                 await self._set_position(ax, ax.position_endstop)
             lo, hi = self.limits_of(ax.name)
-            await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
-                                    max=ax.to_steps(hi), enabled=1)
+            await self._send_limits(ax, lo, hi)
             st.homed = True
             log.info("%s homed", ax.name)
         finally:
@@ -1790,8 +1795,7 @@ class MotionController:
         self.state[ax.name].homed = True
         lo, hi = ((start, start) if ax.name == "zoom" and self.zoom_locked()
                   else self.limits_of(ax.name))
-        await self.link.request("SET_LIMITS", axis=ax.index, min=ax.to_steps(lo),
-                                max=ax.to_steps(hi), enabled=1)
+        await self._send_limits(ax, lo, hi)
 
     def _servo_persist(self) -> None:
         """Remember where each servo rests (settings.json, at most every 2 s)."""

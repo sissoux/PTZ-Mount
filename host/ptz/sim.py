@@ -154,6 +154,8 @@ class SimTransport:
             a = self._axis(f["axis"])
             if a is None:
                 return self._ack(m, 4)
+            if f["enabled"] and f["max"] <= f["min"]:
+                return self._ack(m, 3)                # as the firmware: bad argument
             a.lim_min, a.lim_max, a.lim_en = f["min"], f["max"], bool(f["enabled"])
             self._ack(m)
         elif n == "ENABLE":

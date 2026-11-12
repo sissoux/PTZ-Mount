@@ -94,9 +94,15 @@
             <span id="accel-val" class="val"></span>
           </div>
           <table id="axis-sliders" class="axis-sliders hidden"><tbody></tbody></table>
-          <div id="zoom-speed-row" class="sliders hidden" title="Zoom speed with the lens selected, in focal mm/s: the servo speed follows the lens's ring (even zooming where the ring is not linear), capped by the servo's max_velocity">
-            <label for="zoom-speed">Zoom speed</label>
-            <input id="zoom-speed" type="range" min="0.5" max="100" step="any">
+          <div id="zoom-speed-row" class="sliders hidden" title="Zoom speed with the lens selected (jog at full deflection, go to, presets). × and mm: the servo speed follows the lens's ring so the focal length changes evenly; capped by the servo's max_velocity">
+            <label for="zoom-speed-mode">Zoom speed</label>
+            <select id="zoom-speed-mode" class="zs-mode">
+              <option value="ratio">× per second: focal multiplied (×2: 50 → 100 mm in 1 s)</option>
+              <option value="focal">mm per second of focal length</option>
+              <option value="ring">% per second of the ring (servo speed)</option>
+            </select>
+            <span></span>
+            <input id="zoom-speed" type="range" step="any">
             <span id="zoom-speed-val" class="val"></span>
           </div>
           <div class="sliders">

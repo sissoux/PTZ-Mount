@@ -348,12 +348,14 @@ function renderSettings(st) {
   const capped = config.axes.filter((a) => st.effective_speed[a.name] < st.speed_all - 1e-6)
     .map((a) => `${a.name} ${fmtSpeed(st.effective_speed[a.name], a.units)}`);
   $("speed").title = capped.length ? `Capped: ${capped.join(", ")}` : "";
-  // with a lens: the zoom speed is in focal mm/s (slider up to the whole range in 0.5 s)
+  // with a lens: the zoom speed in the chosen mode (x / mm / % per second)
   const zl = status && status.lens && status.lens.list.find((l) => l.name === status.lens.current);
-  $("zoom-speed-row").classList.toggle("hidden", !zl || st.zoom_speed == null);
-  if (zl && st.zoom_speed != null) {
-    $("zoom-speed").max = Math.max(20, 2 * (zl.focal_max - zl.focal_min));
-    syncSlider("zoom-speed", st.zoom_speed, `${fmtNum(st.zoom_speed)} mm/s`);
+  $("zoom-speed-row").classList.toggle("hidden", !zl || !st.zoom_speed_mode);
+  if (zl && st.zoom_speed_mode) {
+    const zs = zoomSpeedMode(st.zoom_speed_mode, zl), sl = $("zoom-speed");
+    if (document.activeElement !== $("zoom-speed-mode")) $("zoom-speed-mode").value = st.zoom_speed_mode;
+    if (document.activeElement !== sl) { sl.min = zs.min; sl.max = zs.max; }
+    syncSlider("zoom-speed", st[zs.key], zs.fmt(st[zs.key]), zs.from);
   }
   syncSlider("smoothing", st.smoothing, st.smoothing > 0 ? `${st.ease_s.toFixed(2)} s` : "off");
   syncSlider("play-speed", st.play_speed, times(st.play_speed), Math.log2);
@@ -379,12 +381,32 @@ $("smoothing").oninput = () => {
   clearTimeout(smoothTimer);
   smoothTimer = setTimeout(() => send({ cmd: "set_motion", smoothing: v }), 80);
 };
+// zoom speed modes: slider scale and the setting each one sets
+function zoomSpeedMode(mode, lens) {
+  const zc = axisCfg("zoom") || { max_velocity: 100, units: "%" };
+  if (mode === "ratio") {      // log slider: x1.05 .. x8 per second
+    return { key: "zoom_rate", min: Math.log2(1.05), max: 3, from: Math.log2, to: (v) => 2 ** v,
+      fmt: (x) => `×${x.toFixed(2)}/s` };
+  }
+  if (mode === "focal") {
+    return { key: "zoom_speed", min: 0.5, max: Math.max(20, 2 * (lens.focal_max - lens.focal_min)),
+      from: (v) => v, to: (v) => v, fmt: (v) => `${fmtNum(v)} mm/s` };
+  }
+  return { key: "zoom_ring_speed", min: zc.max_velocity / 200, max: zc.max_velocity,
+    from: (v) => v, to: (v) => v, fmt: (v) => `${fmtNum(v)} ${zc.units}/s` };
+}
 let zoomSpeedTimer = null;
 $("zoom-speed").oninput = () => {
-  const v = Math.max(parseFloat($("zoom-speed").value), 0.5);
-  $("zoom-speed-val").textContent = `${fmtNum(v)} mm/s`;
+  const lens = status.lens.list.find((l) => l.name === status.lens.current);
+  if (!lens) return;
+  const zs = zoomSpeedMode($("zoom-speed-mode").value, lens), v = zs.to(parseFloat($("zoom-speed").value));
+  $("zoom-speed-val").textContent = zs.fmt(v);
   clearTimeout(zoomSpeedTimer);
-  zoomSpeedTimer = setTimeout(() => send({ cmd: "set_motion", zoom_speed: v }), 80);
+  zoomSpeedTimer = setTimeout(() => send({ cmd: "set_motion", [zs.key]: v }), 80);
+};
+$("zoom-speed-mode").onchange = () => {
+  send({ cmd: "set_motion", zoom_speed_mode: $("zoom-speed-mode").value, id: "zsm" });
+  $("zoom-speed-mode").blur();
 };
 $("advanced").onchange = () => send({ cmd: "set_motion", advanced: $("advanced").checked, id: "adv" });
 

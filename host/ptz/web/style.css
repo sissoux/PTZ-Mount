@@ -35,6 +35,7 @@ select, input[type=text] { background: #15171a; color: var(--text); border: 1px 
 input[type=text] { flex: 1; min-width: 80px; }
 .row { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .sliders { display: grid; grid-template-columns: auto 1fr 52px; gap: 8px 10px; align-items: center; margin-top: 12px; }
+.sliders .zs-mode { grid-column: 2 / 4; min-width: 0; }
 .sliders .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
 .control { display: grid; grid-template-columns: 1fr 60px; gap: 12px; }
 .control h2, .control .sliders, .control .hint { grid-column: 1 / -1; }

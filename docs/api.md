@@ -277,7 +277,7 @@ Examples:
 
 | Command | Parameters |
 |---|---|
-| `set_motion` | `speed` (units/s) and `accel` (units/s²), common to all axes and capped per axis; `smoothing` 0..1 (ease in/out; the ramp time is `smoothing × ease_time`); `advanced` (bool); `axis_speed` / `axis_accel` (`{"pan": 40, ...}`, used in advanced mode); `zoom_speed`: zoom speed in **focal mm/s** while a lens is selected (default 20), see 5.12 |
+| `set_motion` | `speed` (units/s) and `accel` (units/s²), common to all axes and capped per axis; `smoothing` 0..1 (ease in/out; the ramp time is `smoothing × ease_time`); `advanced` (bool); `axis_speed` / `axis_accel` (`{"pan": 40, ...}`, used in advanced mode); zoom speed while a lens is selected, see 5.12: `zoom_speed_mode` (`"ratio"`, `"focal"` or `"ring"`), `zoom_rate` (× per second, ratio mode, default 2), `zoom_speed` (focal mm/s, default 20), `zoom_ring_speed` (zoom axis units/s) |
 
 Settings are stored on the Pi and survive restarts. The values in effect
 are in `status.settings`.
@@ -520,13 +520,21 @@ tele, so that:
   (or `goto` with `focal`) goes to a focal length. Between the focal marks
   learned on the ring (for an 18-135: 35, 50, 85 mm) the focal length is
   interpolated linearly; without marks, linearly between the two ends;
-* the zoom speed is in **focal mm/s** (`set_motion` `zoom_speed`, the web
-  *Zoom speed* slider): jogs (full deflection) and moves (`goto`, presets,
-  `zoom_focal`, VISCA) change the focal length at that rate. A ring is
-  rarely linear (the marks give its curve): the servo / motor speed follows
-  the curve where the zoom is (moves are planned along the focal length),
-  capped by the axis's `max_velocity`. Acceleration stays in axis units.
-  With no lens, the zoom axis speed (units/s) applies;
+* the zoom speed is the operator's choice (`set_motion`
+  `zoom_speed_mode`, the web *Zoom speed* menu and slider), for jogs (full
+  deflection) and moves (`goto`, presets, `zoom_focal`, VISCA):
+  * `"ratio"` (default): the focal length is multiplied by `zoom_rate`
+    each second (×2: 18 → 36 mm or 50 → 100 mm in 1 s), the same feel at
+    both ends of the zoom;
+  * `"focal"`: `zoom_speed` focal mm per second;
+  * `"ring"`: `zoom_ring_speed` zoom axis units (%) per second, the ring's
+    own speed.
+
+  A ring is rarely linear (the marks give its curve): in `ratio` and
+  `focal` the servo / motor speed follows the curve where the zoom is
+  (moves are planned along ln(focal) or the focal length), capped by the
+  axis's `max_velocity`. Acceleration stays in axis units. With no lens,
+  the zoom axis speed (units/s) applies;
 * a lens may have its own **max tilt** (a long lens hitting the mount when
   the camera tilts down): it replaces the soft limit's tilt max while that
   lens is selected, and never goes past the configured tilt travel.

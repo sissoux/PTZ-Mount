@@ -334,6 +334,20 @@ class PTZClient:
     async def zoom_focal(self, focal: float, wait: bool = False) -> dict:
         return await self.call("zoom_focal", focal=focal, wait=wait)
 
+    async def servo_start(self, focal=None, lens=None, position=None, last: bool = False,
+                          axis: str = "zoom") -> dict:
+        """Start the servo's pulses where it is: focal (mm) of lens, position, or last."""
+        msg = {"axis": axis}
+        if focal is not None:
+            msg["focal"] = focal
+            if lens is not None:
+                msg["lens"] = lens
+        if position is not None:
+            msg["position"] = position
+        if last:
+            msg["last"] = True
+        return await self.call("servo_start", **msg)
+
     async def lens_learn(self, on: bool = True) -> dict:
         """Servo zoom: unlock the zoom with no lens for 60 s (renew while learning)."""
         return await self.call("lens_learn", on=on)

@@ -44,6 +44,10 @@ function connect() {
 }
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function onReply(m) {
+  if (m.cmd === "servo_start" && servoStartOpen) {
+    if (m.ok) closeServoStart(); else $("ss-msg").textContent = m.error;
+    return;
+  }
   if (m.cmd === "lens_save" && lensWizardOpen) {
     if (m.ok) closeLensWizard(false); else $("lw-msg").textContent = m.error;
     return;
@@ -260,7 +264,10 @@ $("btn-track-edit").onclick = () => {
 
 // ------------------------------------------------------------ axis on / off
 function setAxisActive(name, on) {
+  const ac = axisCfg(name);
+  if (on && ac && ac.servo && name === "zoom") { openServoStart(); return; }   // asks where it is
   send({ cmd: "axis_active", axis: name, on, id: "act" });
+  if (on && ac && ac.servo) { showError(`${name} on: start its servo (position)`); return; }
   if (on) showError(`${name} switched on: home it before use`);
 }
 
@@ -696,6 +703,8 @@ function renderLens(lens, za) {
   $("lens-info").textContent = lens.focal != null ? `${Math.round(lens.focal)} mm`
     : lens.locked ? "🔒 zoom locked: choose the lens fitted" : "";
   $("lens-info").classList.toggle("locked", !!lens.locked);
+  $("btn-servo-start").classList.toggle("hidden",
+    !(za && za.servo && za.active !== false && za.available !== false && za.armed === false));
   if (lens.focal != null && $("ro-val-zoom")) $("ro-val-zoom").textContent = `${Math.round(lens.focal)} mm`;
   if (lensWizardOpen && za) renderLensWizard(za);
 }
@@ -785,13 +794,15 @@ function closeLensWizard(restore) {
   if (restore && lensPrev) send({ cmd: "lens_select", name: lensPrev, id: "ls" });
 }
 function renderLensWizard(za) {
-  const on = za.active !== false, ready = on && za.homed;
+  const on = za.active !== false && (!lwServo || za.armed !== false), ready = on && za.homed;
   $("lw-state").textContent = lwServo
-    ? (za.available === false ? "Unavailable: reflash the board firmware" : !on ? "Zoom servo off" : "Servo ready ✓")
+    ? (za.available === false ? "Unavailable: reflash the board firmware"
+      : za.active === false ? "Zoom servo off" : !on ? "Servo not started (no pulse)" : "Servo ready ✓")
     : !on ? "Zoom drive off" : za.homing ? "Homing…"
       : !za.homed ? "Not homed: homing turns the ring until the endstop" : "Homed ✓";
   $("lw-state").classList.toggle("ok", ready);
   $("lw-on").classList.toggle("hidden", on);
+  $("lw-on").textContent = lwServo ? "Start the servo…" : "Turn zoom on";
   $("lw-home").disabled = !on || za.homing;
   $("lw-pos").textContent = !za.homed ? "-"
     : fmtPos(za.pos, za.units) + (za.pulse != null ? ` (${za.pulse} µs)` : "");
@@ -830,6 +841,61 @@ function lwMarkEnd(id) {
 }
 $("lw-mark-min").onclick = () => lwMarkEnd("lw-fmin");
 $("lw-mark-max").onclick = () => lwMarkEnd("lw-fmax");
+// ------------------------------------------------------------ zoom servo start
+// Pulses never start by themselves: the operator says where the zoom is, the
+// servo starts there (no full-speed rush to an old position).
+let servoStartOpen = false;
+function openServoStart() {
+  const za = status && status.axes.zoom, zc = axisCfg("zoom");
+  if (!za || !zc) return;
+  if (za.available === false) { showError(status.mcu_warning); return; }
+  const lenses = (status.lens && status.lens.list) || [];
+  const pref = (status.lens && status.lens.current) || (lensWizardOpen && lensEdit ? lensEdit.name : "")
+    || (lensWizardOpen ? lensPrev : "") || "";
+  $("ss-lens").innerHTML = `<option value="">Choose the lens fitted…</option>`
+    + lenses.map((l) => `<option value="${escapeHtml(l.name)}">${escapeHtml(l.name)} · ${l.focal_min}-${l.focal_max} mm</option>`).join("");
+  $("ss-lens").value = lenses.some((l) => l.name === pref) ? pref : "";
+  $("ss-lens-part").classList.toggle("hidden", !lenses.length);
+  $("ss-focal").value = "";
+  $("ss-msg").textContent = lenses.length ? "" : "No lens learned yet: only the last position can be used.";
+  const cur = lenses.find((l) => l.name === (status.lens && status.lens.current));
+  $("ss-last-note").textContent = `${fmtPos(za.pos, za.units)}, ${za.pulse} µs`
+    + (cur && status.lens.focal != null ? ` (${Math.round(status.lens.focal)} mm on ${cur.name})` : "")
+    + ": only if the ring was not turned by hand since the servo was last on.";
+  renderServoQuick();
+  servoStartOpen = true;
+  $("servo-start").classList.remove("hidden");
+  if ($("ss-lens").value) $("ss-focal").focus();
+}
+function closeServoStart() {
+  servoStartOpen = false;
+  $("servo-start").classList.add("hidden");
+}
+function renderServoQuick() {
+  const l = ((status.lens && status.lens.list) || []).find((x) => x.name === $("ss-lens").value);
+  $("ss-focal").disabled = $("ss-go").disabled = !l;
+  if (!l) { $("ss-quick").innerHTML = ""; return; }
+  $("ss-focal").min = l.focal_min; $("ss-focal").max = l.focal_max;
+  $("ss-focal").placeholder = `${l.focal_min}-${l.focal_max}`;
+  const fs = [...new Set([l.focal_min, ...(l.points || []).map((p) => p[1]), l.focal_max])].sort((a, b) => a - b);
+  $("ss-quick").innerHTML = `<span class="muted">Printed on the barrel:</span>`
+    + fs.map((f) => `<button class="small" data-f="${f}">${f} mm</button>`).join("");
+  $("ss-quick").querySelectorAll("[data-f]").forEach((b) => {
+    b.onclick = () => { $("ss-focal").value = b.dataset.f; $("ss-msg").textContent = ""; };
+  });
+}
+$("ss-lens").onchange = () => { renderServoQuick(); $("ss-msg").textContent = ""; };
+$("ss-go").onclick = () => {
+  const lens = $("ss-lens").value, f = parseFloat($("ss-focal").value);
+  if (!lens) { $("ss-msg").textContent = "Choose the lens fitted"; return; }
+  if (!(f > 0)) { $("ss-msg").textContent = "Give the focal length the zoom is at now (mm)"; return; }
+  send({ cmd: "servo_start", axis: "zoom", lens, focal: f, id: "ss" });
+};
+$("ss-focal").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); $("ss-go").click(); } };
+$("ss-last").onclick = () => send({ cmd: "servo_start", axis: "zoom", last: true, id: "ss" });
+$("ss-cancel").onclick = closeServoStart;
+$("btn-servo-start").onclick = openServoStart;
+
 $("lw-save").onclick = () => lensSave({});
 $("lw-slider").oninput = () => {        // drag: follow, ~8 moves per second
   lwSliding = Date.now();

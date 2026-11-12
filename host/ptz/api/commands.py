@@ -39,6 +39,9 @@ Zoom lenses (the zoom drive turns the lens's zoom ring)
     With a lens selected, a positive zoom jog always zooms in, whatever the
     direction of its ring, and the zoom stays between the ring's two ends.
     Servo zoom with no lens selected: the zoom is locked (no motion at all).
+    {"cmd": "servo_start", "focal": 35, "lens": "Kit 18-135"}   start the servo's
+        pulses where it is (no jump): the focal now (mm) on that lens, or
+        "position": x, or "last": true. Needed after every power-up / zoom on.
     {"cmd": "lens_learn", "on": true}   learning a lens: zoom free over its travel
                                         for 60 s (send again to renew; off: lock)
 Shutdown
@@ -218,6 +221,10 @@ async def dispatch(ctrl: MotionController, msg: Any, source: str = "",
             await ctrl.lens_delete(msg.get("name"))
         elif cmd == "lenses":
             reply["lens"] = ctrl.lens_status()
+        elif cmd == "servo_start":
+            reply["servo"] = await ctrl.servo_start(msg.get("axis") or "zoom", msg.get("focal"),
+                                                    msg.get("lens"), msg.get("position"),
+                                                    bool(msg.get("last", False)))
         elif cmd == "lens_learn":
             await ctrl.lens_learn(bool(msg.get("on", True)))
             reply["lens"] = ctrl.lens_status()

@@ -132,6 +132,10 @@ class MotionController:
         # servo does not jump), firmware without servo output
         self._servo_pos: Dict[str, float] = {}
         self._servo_saved = 0.0
+        # servo axes whose pulses may run: started by servo_start once the
+        # operator said where the servo is (no pulse before: a servo far from
+        # its first target would jump there at full speed)
+        self._servo_armed: Set[str] = set()
         self.fw_version: Optional[int] = None
         self.servo_unsupported: List[str] = []
         self.mcu_warning = ""
@@ -737,12 +741,6 @@ class MotionController:
         return bool(ax is not None and ax.servo and self._lens() is None
                     and not self.lens_learning)
 
-    def _zoom_lock_note(self) -> None:
-        now = time.monotonic()
-        if now - self._zoom_lock_log > 5.0:
-            self._zoom_lock_log = now
-            log.warning(ZOOM_LOCKED)
-
     async def lens_learn(self, on: bool) -> None:
         """Learning a lens (servo zoom): the zoom may move over its whole
         travel with no lens selected. Ends after LENS_LEARN_TTL s unless
@@ -776,6 +774,96 @@ class MotionController:
                     break
                 await asyncio.sleep(0.025)
         await self._apply_limits(["zoom"])
+
+    def _servo_block(self, name: str) -> Optional[str]:
+        """Why this servo axis must not move now (None: free)."""
+        ax = self.cfg.axes.get(name)
+        if ax is None or not ax.servo or not self.axis_active.get(name):
+            return None
+        if name not in self._servo_armed:
+            return (f"{name} servo not started: say where the {name} is first "
+                    "(web UI: turn the zoom on)")
+        if name == "zoom" and self.zoom_locked():
+            return ZOOM_LOCKED
+        return None
+
+    def _servo_block_note(self, msg: str) -> None:
+        now = time.monotonic()
+        if now - self._zoom_lock_log > 5.0:
+            self._zoom_lock_log = now
+            log.warning(msg)
+
+    async def servo_start(self, name: str = "zoom", focal: Optional[float] = None,
+                          lens: Optional[str] = None, position: Optional[float] = None,
+                          last: bool = False) -> dict:
+        """Start a servo's pulses where the operator says it is, so it does
+        not jump at full speed: zoom `focal` (mm) of `lens` (default: the one
+        selected; another lens given is selected too, outside a learning),
+        or `position` (axis units), or `last`: the last position commanded
+        (the servo was not turned by hand since). Switches the axis on."""
+        ax = self.axis(name)
+        if not ax.servo:
+            raise MotionError(f"{name} is not a servo")
+        if name in self.servo_unsupported:
+            raise MotionError(self.mcu_warning)
+        self._check_ready()
+        if sum((focal is not None, position is not None, bool(last))) != 1:
+            raise MotionError(f"say where the {name} is: focal (mm, with its lens), "
+                              "position, or last")
+        select = None
+        if focal is not None:
+            if name != "zoom":
+                raise MotionError("focal is for the zoom")
+            lname = self.lens if lens is None else (str(lens) or None)
+            if lname is None or lname not in self.lenses:
+                raise MotionError("choose the lens fitted to give its focal length"
+                                  if lname is None else f"unknown lens '{lname}'")
+            L = self.lenses[lname]
+            try:
+                f = float(focal)
+            except (TypeError, ValueError):
+                raise MotionError("focal must be a number (mm)") from None
+            if not L["focal_min"] <= f <= L["focal_max"]:
+                raise MotionError(f"{f:g} mm is not on the {lname} "
+                                  f"({L['focal_min']:g}-{L['focal_max']:g} mm)")
+            pos = self.focal_to_position(f, L)
+            if lname != self.lens and not self.lens_learning:
+                select = lname
+            how = f"{f:g} mm on {lname}"
+        elif position is not None:
+            try:
+                pos = float(position)
+            except (TypeError, ValueError):
+                raise MotionError("position must be a number") from None
+            how = f"position {pos:g} {ax.units}"
+        else:
+            pos = self._servo_start(ax)
+            how = "its last position"
+        pos = clamp(pos, ax.position_min, ax.position_max)
+        if select is not None:
+            await self.lens_select(select)       # the lens fitted, confirmed
+        bit = 1 << ax.index
+        self._cancel_jog([name])
+        self._cancel_raw([name])
+        if self._traj is not None and name in self._traj.axes:
+            self._cancel_motion()
+        if self.state[name].flags & P.ST_ENABLED:  # already pulsing: release first
+            await self.link.request("ENABLE", axis_mask=bit, enable_mask=0)
+        await self.link.request("STOP", axis_mask=bit)
+        await self._set_position(ax, pos)
+        self.state[name].homed = True
+        if not self.axis_active[name]:
+            self.axis_active[name] = True
+        self._servo_pos[name] = round(pos, 2)
+        self._save_settings()
+        lo, hi = ((pos, pos) if name == "zoom" and self.zoom_locked()
+                  else self.limits_of(name))
+        await self._send_limits(ax, lo, hi)
+        self._servo_armed.add(name)
+        await self.link.request("ENABLE", axis_mask=bit, enable_mask=bit)
+        log.info("%s servo started at %s: %.2f %s (%g us)", name, how, pos, ax.units,
+                 ax.pulse_us(pos))
+        return {"axis": name, "position": round(pos, 3), "pulse": ax.pulse_us(pos)}
 
     def zoom_ends(self) -> Tuple[float, float]:
         """Zoom axis positions of the wide and tele ends (no lens: the
@@ -828,8 +916,8 @@ class MotionController:
             return None
         return self._interp(self._focal_curve(lens), self.zoom_fraction(), 0, 1)
 
-    def focal_to_position(self, focal: float) -> float:
-        lens = self._lens()
+    def focal_to_position(self, focal: float, lens: Optional[dict] = None) -> float:
+        lens = lens or self._lens()
         if lens is None:
             raise MotionError("no lens selected: choose the lens fitted first")
         try:
@@ -1042,6 +1130,7 @@ class MotionController:
             self._cancel_jog([name])
             self._cancel_raw([name])
             self.axis_active[name] = False
+            self._servo_armed.discard(name)
             if self.ready:
                 await self.link.request("STOP", axis_mask=1 << ax.index)
                 await self.link.request("ENABLE", axis_mask=1 << ax.index, enable_mask=0)
@@ -1054,8 +1143,8 @@ class MotionController:
             if self.ready and self.cfg.motion.enable_on_start:
                 await self.enable(True, [name])
         self._save_settings()
-        log.info("axis %s %s", name, ("enabled" if ax.servo else "enabled: home it before use")
-                 if on else "disabled")
+        log.info("axis %s %s", name, ("on: say where it is to start the servo" if ax.servo
+                                      else "enabled: home it before use") if on else "disabled")
 
     # ================================================================ blocking mode
     def lock(self, client: str, label: str) -> None:
@@ -1115,10 +1204,13 @@ class MotionController:
         now = asyncio.get_running_loop().time()
         if "zoom" in values and self.zoom_sign() < 0:    # +: zoom in (tele), any lens
             values = {**values, "zoom": -float(values["zoom"])}
-        if "zoom" in values and self.zoom_locked():
-            if values["zoom"]:
-                self._zoom_lock_note()
-            values = {n: v for n, v in values.items() if n != "zoom"}
+        blocked = {n: self._servo_block(n) for n in values if n in self.state}
+        blocked = {n: why for n, why in blocked.items() if why}
+        if blocked:
+            for n, why in blocked.items():
+                if values[n]:
+                    self._servo_block_note(why)
+            values = {n: v for n, v in values.items() if n not in blocked}
         shaped = {n: self._shape(v) for n, v in values.items()
                   if n in self.state and n not in self._homing and n not in self._raw
                   and self.axis_active.get(n)}
@@ -1415,12 +1507,15 @@ class MotionController:
         targets = {n: v for n, v in targets.items() if n not in skipped}
         if skipped and not targets:
             raise MotionError(f"{', '.join(skipped)} is disabled")
-        if "zoom" in targets and self.zoom_locked():
-            # a preset still moves pan / tilt, never the zoom
-            targets = {n: v for n, v in targets.items() if n != "zoom"}
+        blocked = {n: self._servo_block(n) for n in targets if n in self.state}
+        blocked = {n: why for n, why in blocked.items() if why}
+        if blocked:
+            # a preset still moves pan / tilt, never a blocked zoom
+            targets = {n: v for n, v in targets.items() if n not in blocked}
             if not targets:
-                raise MotionError(ZOOM_LOCKED)
-            self._zoom_lock_note()
+                raise MotionError(next(iter(blocked.values())))
+            for why in blocked.values():
+                self._servo_block_note(why)
         for name, target in targets.items():
             ax = self.axis(name)
             if not self.state[name].homed:
@@ -1455,6 +1550,9 @@ class MotionController:
         self._check_ready()
         if not self.axis_active[name]:
             raise MotionError(f"{name} is off: switch it on first")
+        why = self._servo_block(name)
+        if why:
+            raise MotionError(why)
         if name in self._homing:
             raise MotionError(f"axis '{name}' is homing")
         st = self.state[name]
@@ -1486,8 +1584,6 @@ class MotionController:
         if ax.servo:
             # never outside the limits in force: the lens's ring ends and the
             # pulse range (the servo would force), no motion with no lens
-            if name == "zoom" and self.zoom_locked():
-                raise MotionError(ZOOM_LOCKED)
             lo, hi = sorted(ax.to_steps(x) for x in self.limits_of(name))
             target = int(clamp(target, lo, hi))
             if target == st.pos:
@@ -1614,13 +1710,22 @@ class MotionController:
         names = list(names) if names else [a.name for a in self.axes]
         if on:                                   # inactive axes stay unpowered
             names = [n for n in names if self.axis_active.get(n)]
+            # a servo's pulses start only with servo_start (its position confirmed)
+            waiting = [n for n in names if self.cfg.axes[n].servo
+                       and n not in self._servo_armed]
+            if waiting:
+                log.info("%s servo waiting: say where it is to start its pulses",
+                         ", ".join(waiting))
+            names = [n for n in names if n not in waiting]
             if not names:
                 return
         mask = 0
         for n in names:
             mask |= 1 << self.axis(n).index
             if not on:
-                if not self.cfg.axes[n].servo:  # a servo stays absolute
+                if self.cfg.axes[n].servo:      # a servo stays absolute, but may be
+                    self._servo_armed.discard(n)    # turned by hand while released
+                else:
                     self.state[n].homed = False     # may move freely while unpowered
                 self._cancel_jog([n])
                 self._cancel_raw([n])
@@ -1791,6 +1896,7 @@ class MotionController:
         """A servo is absolute (its own position loop): no homing. The MCU
         position is set before the output is enabled."""
         start = self._servo_start(ax)
+        self._servo_armed.discard(ax.name)          # no pulse until servo_start
         await self._set_position(ax, start)
         self.state[ax.name].homed = True
         lo, hi = ((start, start) if ax.name == "zoom" and self.zoom_locked()
@@ -1805,7 +1911,8 @@ class MotionController:
         changed = False
         for ax in self.axes:
             st = self.state[ax.name]
-            if not ax.servo or not st.homed or st.flags & P.ST_MOVING:
+            if (not ax.servo or not st.homed or st.flags & P.ST_MOVING
+                    or ax.name not in self._servo_armed):
                 continue
             p = round(self.position(ax.name), 2)
             if abs(p - self._servo_pos.get(ax.name, math.inf)) >= 0.05:
@@ -2373,6 +2480,7 @@ class MotionController:
                         if ax.name in self._raw else None),
                 "halted": bool(f & P.ST_HALTED),
                 "servo": ax.servo,
+                "armed": (ax.name in self._servo_armed) if ax.servo else None,
                 "pulse": round(st.pos / P.SERVO_TICKS_PER_US, 1) if ax.servo else None,
                 "available": ax.name not in self.servo_unsupported,
                 "enabled": bool(f & P.ST_ENABLED),

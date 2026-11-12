@@ -307,6 +307,16 @@ positions (lens ends and marks, presets, last position) at the same pulse
 widths. The servo starts with the zoom "on" checkbox, at its last position
 (remembered on the Pi).
 
+**The servo never starts by itself.** With no pulse a servo is released
+and its ring may be turned by hand; its first pulse would send it at full
+speed to the old position. So when the zoom is switched on (and after a
+restart of the Pi or the board, *Motors off*, zoom off) the web UI asks
+where the zoom is: the lens fitted and its focal now (buttons for the
+focals printed on the barrel; if unsure, turn the ring by hand to one).
+The servo starts there, then only corrects a small error. *Start at the
+last position* is for a ring nobody touched. Until then the zoom gets no
+pulse and does not move (*▶ Start the zoom servo…* in the Lens row).
+
 **No lens selected = zoom locked.** A servo forces its way to the position
 asked: past a lens's ring end it could break the lens. So with no lens
 selected nothing moves the zoom (rocker, gamepad, VISCA, UDP, presets,

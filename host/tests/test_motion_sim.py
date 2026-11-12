@@ -6,6 +6,7 @@ import json
 import pytest
 
 from ptz import config as C
+from ptz import protocol as P
 from ptz.api.commands import dispatch
 from ptz.api.visca import ViscaServer
 from ptz.mcu import McuLink
@@ -1202,9 +1203,18 @@ def test_servo_zoom_absolute_no_homing(tmp_path):
         z = ctrl.state["zoom"]
         steps = {n: ctrl.state[n].pos for n in ("pan", "tilt")}
         st = ctrl.status()["axes"]["zoom"]
-        # usable at once, at the middle of its range (nothing saved yet), no move
+        # absolute (no homing), at the middle of its range (nothing saved yet),
+        # but no pulse until the operator says where it is
         assert z.homed and st["servo"] and st["pulse"] == 1500
+        assert st["armed"] is False and not st["enabled"]
         assert not ctrl.state["pan"].homed and not ctrl.state["tilt"].homed
+        await ctrl.lens_learn(True)
+        with pytest.raises(MotionError, match="not started"):
+            await ctrl.goto({"zoom": 80})
+        await ctrl.servo_start(last=True)
+        await asyncio.sleep(0.05)                           # next MCU status
+        st = ctrl.status()["axes"]["zoom"]
+        assert st["armed"] and st["enabled"] and st["pulse"] == 1500
         assert ctrl.jog({"pan": 1.0}) == ["pan"]            # the head still needs homing
         ctrl.jog({"pan": 0.0})
         await ctrl.lens_learn(True)                         # no lens: learning unlocks
@@ -1221,10 +1231,15 @@ def test_servo_zoom_absolute_no_homing(tmp_path):
         r = await ctrl.raw_move("zoom", -100000, 4000, wait=True)
         assert r["target"] == 2000 and r["result"] == "done"     # 1000 us, no further
         assert ctrl.state["zoom"].homed
-        # output off and on: still absolute
+        # output off and on: still absolute, started again where it is
         await ctrl.set_axis_active("zoom", False)
         await ctrl.set_axis_active("zoom", True)
-        assert z.homed
+        await asyncio.sleep(0.05)                           # next MCU status
+        assert z.homed and not ctrl.status()["axes"]["zoom"]["armed"]
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]
+        with pytest.raises(MotionError, match="not started"):
+            await ctrl.goto({"zoom": 30})
+        await ctrl.servo_start(position=40)
         await ctrl.goto({"zoom": 30}, wait=True)
         await asyncio.sleep(2.5)                            # remembered (every 2 s)
         assert {n: ctrl.state[n].pos for n in ("pan", "tilt")} == steps   # head never moved
@@ -1237,6 +1252,7 @@ def test_servo_zoom_absolute_no_homing(tmp_path):
     async def t2(ctrl):                                     # after a restart: same place
         assert ctrl.state["zoom"].homed
         assert ctrl.position("zoom") == pytest.approx(30, abs=0.05)
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]  # no pulse before servo_start
     run(t2, tmp_path, SERVO_CFG)
 
 
@@ -1244,6 +1260,7 @@ def test_servo_zoom_locked_without_lens(tmp_path):
     async def t(ctrl):
         z = ctrl.state["zoom"]
         start = z.pos
+        await ctrl.servo_start(last=True)
         assert ctrl.zoom_locked() and ctrl.lens_status()["locked"]
         assert ctrl.limits_of("zoom") == (50, 50)           # pinned where it is
         # no control moves it: goto, relative, VISCA-style fraction, raw steps, jog
@@ -1337,6 +1354,53 @@ def test_servo_pulse_range_change_keeps_positions(tmp_path):
     run(t2, tmp_path, cfg)
 
 
+def test_servo_start_where_it_is(tmp_path):
+    async def t(ctrl):
+        z = ctrl.state["zoom"]
+        cz = ctrl.cfg.axes["zoom"]
+        await ctrl.servo_start(last=True)
+        await ctrl.lens_learn(True)
+        await ctrl.lens_save("Kit", 18, 135, points=[[30, 18], [50, 50], [70, 135]])
+        await ctrl.goto({"zoom": 40}, wait=True)
+        # the servo is released (zoom off), the ring is turned by hand to 135 mm
+        await ctrl.set_axis_active("zoom", False)
+        await ctrl.lens_select(None)
+        await ctrl.set_axis_active("zoom", True)
+        await asyncio.sleep(0.05)
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]        # no pulse yet
+        ctrl.jog({"zoom": 1.0})
+        await asyncio.sleep(0.2)
+        ctrl.jog({"zoom": 0.0})
+        assert ctrl.position("zoom") == pytest.approx(40, abs=0.05)
+        with pytest.raises(MotionError, match="say where"):
+            await ctrl.servo_start()
+        with pytest.raises(MotionError, match="say where"):
+            await ctrl.servo_start(focal=50, last=True)
+        with pytest.raises(MotionError, match="choose the lens"):
+            await ctrl.servo_start(focal=50)
+        with pytest.raises(MotionError, match="not on the Kit"):
+            await ctrl.servo_start(focal=200, lens="Kit")
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]
+        # where it is: the first pulse is the one of 135 mm, no jump to 40 %
+        r = await ctrl.servo_start(focal=135, lens="Kit")
+        await asyncio.sleep(0.05)                           # next MCU status
+        st = ctrl.status()["axes"]["zoom"]
+        assert r["position"] == pytest.approx(70) and st["enabled"] and st["armed"]
+        assert st["pulse"] == pytest.approx(cz.pulse_us(70))
+        assert ctrl.lens == "Kit" and ctrl.status()["lens"]["focal"] == pytest.approx(135)
+        await asyncio.sleep(0.1)
+        assert ctrl.position("zoom") == pytest.approx(70, abs=0.05)   # did not move
+        # motors off (e.g. by the web UI): released, must be started again
+        await ctrl.enable(False)
+        await ctrl.enable(True)
+        await asyncio.sleep(0.05)
+        assert not ctrl.status()["axes"]["zoom"]["enabled"]
+        assert ctrl.state["pan"].flags & P.ST_ENABLED                  # the others are on
+        await ctrl.servo_start(focal=50)                            # the lens selected
+        assert ctrl.position("zoom") == pytest.approx(50, abs=0.05)
+    run(t, tmp_path, SERVO_CFG)
+
+
 def test_servo_on_old_firmware(tmp_path):
     async def t(ctrl):
         assert ctrl.servo_unsupported == ["zoom"]
@@ -1374,6 +1438,7 @@ def test_servo_settings_migration_and_lens_marks(tmp_path):
         assert (lens["wide"], lens["tele"]) == (80, 10)
         assert lens["points"] == [[60, 35], [45, 50], [30, 85]]
         assert ctrl.zoom_sign() < 0
+        await ctrl.servo_start(last=True)
         await ctrl.zoom_to_focal(50, wait=True)
         await asyncio.sleep(0.05)
         assert ctrl.position("zoom") == pytest.approx(45, abs=0.1)

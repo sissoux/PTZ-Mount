@@ -187,7 +187,8 @@ function render() {
     st.moving ? flag("moving", "on") : flag("still"),
     a.has_endstop ? (st.endstop ? flag("endstop TRIGGERED", "warn") : flag("endstop open")) : "",
     st.halted ? flag("halted on endstop", "warn") : "",
-    a.servo ? (st.available === false ? flag("needs new firmware", "bad") : flag("servo", "on"))
+    a.servo ? (st.available === false ? flag("needs new firmware", "bad")
+      : st.active && st.armed === false ? flag("servo not started", "warn") : flag("servo", "on"))
       : st.homed ? flag("homed", "on") : flag("not homed"),
     st.raw ? flag("raw move", "on") : "",
     a.servo && axis === "zoom" && status.lens && status.lens.locked ? flag("locked: no lens", "bad")
@@ -201,6 +202,8 @@ function render() {
   $("chk-enabled").disabled = !st.active;
   $("power-hint").textContent = a.servo
     ? (st.available === false ? status.mcu_warning
+      : st.active && st.armed === false ? "Servo not started (no pulse): start it on the Control page "
+        + "(Lens row: ▶ Start the zoom servo…), it asks where the zoom is so it does not jump."
       : !st.active || !st.enabled ? "No pulse: the servo is released (a digital servo may still hold)."
         : "Pulses on: the servo holds the position shown.")
     : !st.active ? "Axis off: its driver is unpowered (safe to plug the motor)."

@@ -259,6 +259,11 @@ Examples:
 * **A value of 0 never interrupts a move.** A non-zero value on an axis that
   is in a `goto`, preset, replay or tracked lap **takes over** smoothly
   (manual override), and that motion is cancelled.
+* **A held input does not fight a new move.** A value already being sent on
+  an axis when a move starts there (a stick, or a controller's zoom rate
+  slider left off-centre) is ignored on that axis until it changes by more
+  than 0.1 (shaped) or returns to 0. The move runs and the axis stays where
+  it landed. Moving or re-pressing the control takes over as above.
 * `scale` multiplies the speed after the deadband and curve. It is a number,
   or per axis: `{"pan": 0.2}`. Use it for a speed slider: a slow setting
   still moves the axis instead of falling into the deadband.

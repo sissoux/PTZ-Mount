@@ -1181,6 +1181,45 @@ max_accel: 2000
 """
 
 
+def test_held_jog_does_not_fight_a_move(tmp_path):
+    # a controller zoom rate slider (or a stick) left deflected: a preset /
+    # go to still runs and stays; moving the input again takes over
+    async def t(ctrl):
+        await ctrl.home()
+        held = {"pan": 0.6}
+        stop = asyncio.Event()
+
+        async def feeder():
+            while not stop.is_set():
+                ctrl.jog(dict(held))
+                await asyncio.sleep(0.04)
+        task = asyncio.ensure_future(feeder())
+        await asyncio.sleep(0.3)
+        assert ctrl._cmd_vel["pan"] > 0                     # the held jog drives pan
+        await ctrl.goto({"pan": -20, "tilt": 5}, wait=True)  # not interrupted
+        await asyncio.sleep(0.3)
+        assert ctrl.position("pan") == pytest.approx(-20, abs=0.1)   # and stays
+        held["pan"] = 0.62                                   # noise: still ignored
+        await asyncio.sleep(0.2)
+        assert ctrl.position("pan") == pytest.approx(-20, abs=0.1)
+        held["pan"] = 1.0                                    # moved: takes over
+        await asyncio.sleep(0.3)
+        assert ctrl.position("pan") > -19
+        held["pan"] = 0.0
+        await asyncio.sleep(0.3)
+        held["pan"] = 0.6                                    # a new deflection
+        mv = asyncio.ensure_future(ctrl.goto({"pan": 30}, wait=True))
+        await asyncio.sleep(0.05)
+        held["pan"] = 0.0                                    # released, then
+        await asyncio.sleep(0.1)
+        held["pan"] = -0.8                                   # pushed again: takes over
+        with pytest.raises(MotionError, match="interrupted"):
+            await mv
+        stop.set()
+        await task
+    run(t, tmp_path)
+
+
 def test_servo_config(tmp_path):
     p = tmp_path / "s.cfg"
     p.write_text(SERVO_CFG.format(state=str(tmp_path).replace("\\", "/")))

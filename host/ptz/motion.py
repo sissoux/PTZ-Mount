@@ -72,6 +72,10 @@ CAR_NUMBER_MAX = 999          # race numbers 1..999
 ZOOM_SPEED_MODES = ("ratio", "focal", "ring")
 ZOOM_SPEED_DEFAULT = 20.0     # mm/s
 ZOOM_RATE_DEFAULT = 2.0       # x per second
+# a jog input already held when a move starts (a stick or a controller's zoom
+# rate slider left deflected) is ignored on that move's axes until it changes
+# by more than this (shaped -1..1) or is released: only a new action takes over
+JOG_HOLD_CHANGE = 0.1
 LENS_LEARN_TTL = 60.0         # s, lens learning ends unless the wizard renews it
 ZOOM_LOCKED = ("zoom locked: no lens selected (the servo could force a lens's ring "
                "past its end). Choose the lens fitted, or learn it")
@@ -141,6 +145,8 @@ class MotionController:
         self.lock_label = ""
         self.sources: Dict[Tuple[str, str], float] = {}   # (kind, ip) -> last seen
         self._refused_log = 0.0
+        self._jog_in: Dict[str, Tuple[float, float]] = {}   # last jog value, time
+        self._jog_hold: Dict[str, float] = {}               # held values ignored
         self.play_speed = 1.0                 # replay speed factor
         self.play_loop = False
         # servo axes: last position (absolute, set again after a restart so the
@@ -1284,7 +1290,8 @@ class MotionController:
         slider: a slow setting must not fall into the deadband).
 
         A non-zero jog on an axis that is running a move or a replay takes
-        over (manual override). Zero values never interrupt a move.
+        over (manual override). Zero values never interrupt a move, nor does
+        an input already held when the move started (until it changes).
         Returns the axes refused because they are not homed."""
         if not self.ready or self.estopped:
             return []
@@ -1315,6 +1322,14 @@ class MotionController:
             if refused and now - self._refused_log > 2.0:
                 self._refused_log = now
                 log.warning("jog refused: %s not homed (home first)", ", ".join(refused))
+        for n, v in list(shaped.items()):
+            self._jog_in[n] = (v, now)
+            held = self._jog_hold.get(n)
+            if held is not None:
+                if v == 0.0 or abs(v - held) > JOG_HOLD_CHANGE:
+                    del self._jog_hold[n]           # released or moved: live again
+                else:
+                    del shaped[n]                   # still the held input: ignored
         if self._traj is not None and any(v != 0.0 and n in self._traj.axes
                                           for n, v in shaped.items()):
             log.info("manual jog: %s interrupted", self._traj_kind or "move")
@@ -1495,6 +1510,15 @@ class MotionController:
         future resolves to False instead of failing with 'move interrupted')."""
         self._cancel_traj(quiet=replace)
         self._cancel_jog(traj.axes)
+        now = asyncio.get_running_loop().time()
+        for n in traj.axes:      # inputs held right now must not take the move over
+            v, t = self._jog_in.get(n, (0.0, -math.inf))
+            if v != 0.0 and now - t <= self.cfg.motion.jog_timeout:
+                if n not in self._jog_hold:
+                    log.info("%s: held jog input ignored until it moves or is released", n)
+                self._jog_hold[n] = v
+            else:
+                self._jog_hold.pop(n, None)
         self._des_hist.clear()
         fut = asyncio.get_running_loop().create_future()
         self._traj, self._traj_kind, self._traj_future = traj, kind, fut
